@@ -881,6 +881,7 @@ const formatReferenceByStyle = (args: {
 }): string => {
 	const title = stripTrailingPeriod(args.title);
 	const publicationTitle = stripTrailingPeriod(args.publicationTitle);
+	const publicationTitleItalic = publicationTitle ? italicizeMarkdown(publicationTitle) : '';
 	const url = stripTrailingUrlPunctuation(args.url);
 
 	if (args.style === 'RMIT Harvard') {
@@ -889,8 +890,8 @@ const formatReferenceByStyle = (args: {
 			? `${authorText} ${args.publicationDate.dayMonthYear} '${title}'`
 			: `'${title}' ${args.publicationDate.dayMonthYear}`;
 		const detailParts: string[] = [];
-		if (publicationTitle) {
-			detailParts.push(italicizeMarkdown(publicationTitle));
+		if (publicationTitleItalic) {
+			detailParts.push(publicationTitleItalic);
 		}
 		if (args.accessedDate) {
 			detailParts.push(`accessed ${args.accessedDate}`);
@@ -905,7 +906,7 @@ const formatReferenceByStyle = (args: {
 		const lead = authorText
 			? `${authorText} (${args.publicationDate.apaDatePart}). ${title}.`
 			: `${title}. (${args.publicationDate.apaDatePart}).`;
-		const publicationPart = publicationTitle ? ` ${publicationTitle}.` : '';
+		const publicationPart = publicationTitleItalic ? ` ${publicationTitleItalic}.` : '';
 		const base = `${lead}${publicationPart}`.trim();
 		return url ? `${stripTrailingPeriod(base)}. ${url}` : base;
 	}
@@ -914,8 +915,8 @@ const formatReferenceByStyle = (args: {
 		const authorText = formatMlaAuthors(args.authors);
 		const datePart = args.publicationDate.dayMonthYear;
 		let base = authorText ? `${authorText}. "${title}."` : `"${title}."`;
-		if (publicationTitle) {
-			base += ` ${publicationTitle},`;
+		if (publicationTitleItalic) {
+			base += ` ${publicationTitleItalic},`;
 		}
 		if (datePart) {
 			base += ` ${datePart}`;
@@ -930,10 +931,10 @@ const formatReferenceByStyle = (args: {
 		const yearPart = args.publicationDate.year;
 		const lead = authorText ? `${authorText}. ${yearPart}. "${title}."` : `"${title}." ${yearPart}.`;
 		let detail = '';
-		if (publicationTitle && args.publicationDate.hasFullDate) {
-			detail = ` ${publicationTitle}, ${args.publicationDate.monthDayYear}.`;
-		} else if (publicationTitle) {
-			detail = ` ${publicationTitle}.`;
+		if (publicationTitleItalic && args.publicationDate.hasFullDate) {
+			detail = ` ${publicationTitleItalic}, ${args.publicationDate.monthDayYear}.`;
+		} else if (publicationTitleItalic) {
+			detail = ` ${publicationTitleItalic}.`;
 		} else if (args.publicationDate.hasFullDate) {
 			detail = ` ${args.publicationDate.monthDayYear}.`;
 		}
@@ -951,8 +952,8 @@ const formatReferenceByStyle = (args: {
 		base += ` ${authorText},`;
 	}
 	base += ` "${title},"`;
-	if (publicationTitle) {
-		base += ` ${publicationTitle},`;
+	if (publicationTitleItalic) {
+		base += ` ${publicationTitleItalic},`;
 	}
 	if (datePart) {
 		base += ` ${datePart}`;

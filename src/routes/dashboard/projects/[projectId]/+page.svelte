@@ -40,6 +40,11 @@
 
 	type CitationQuotaState = PageData['citationQuota'];
 
+	type CitationDisplayRow = CitationRow & {
+		displayInTextCitation: string;
+		displayReferenceCitation: string;
+	};
+
 	let { data }: { data: PageData } = $props();
 
 	const getInitialStyleValue = (): string => data.project.citationStyle;
@@ -69,6 +74,7 @@
 	let isRenameDialogOpen = $state(false);
 	let isShareOpen = $state(false);
 	let isCitationComposerOpen = $state(false);
+	let isReferencePreviewOpen = $state(false);
 	let isDeleteConfirmOpen = $state(false);
 	let citationLinesInput = $state('');
 	let styleValue = $state(getInitialStyleValue());
@@ -91,6 +97,58 @@
 			.replaceAll("'", '&#39;');
 
 	const stripItalicMarkers = (value: string): string => value.replace(/\*([^*]+)\*/g, '$1');
+	const referenceSortCollator = new Intl.Collator(undefined, {
+		sensitivity: 'base',
+		numeric: true
+	});
+
+	const stylesRequiringSortedReferenceList = new Set(['APA', 'MLA', 'Chicago', 'RMIT Harvard']);
+	const stylesRequiringHangingIndent = new Set([
+		'APA',
+		'MLA',
+		'Chicago',
+		'RMIT Harvard',
+		'IEEE'
+	]);
+
+	const shouldSortReferenceListForStyle = (style: string): boolean =>
+		stylesRequiringSortedReferenceList.has(style);
+
+	const shouldUseHangingIndentForStyle = (style: string): boolean =>
+		stylesRequiringHangingIndent.has(style);
+
+	const stripLeadingIeeeIndex = (value: string): string =>
+		value.replace(/^\[\d+\]\s*/, '').trim();
+
+	const getReferenceSortKey = (value: string): string =>
+		stripLeadingIeeeIndex(stripItalicMarkers(value))
+			.replace(/^["'“”‘’([{]+/, '')
+			.toLowerCase();
+
+	const IEEE_INDEX_EXACT_PATTERN = /^\[\d+\]$/;
+	const IEEE_INDEX_PREFIX_PATTERN = /^\[\d+\]\s*/;
+
+	const withIeeeInTextIndex = (value: string, index: number): string => {
+		const normalized = value.trim();
+		if (!normalized || IEEE_INDEX_EXACT_PATTERN.test(normalized)) {
+			return `[${index}]`;
+		}
+
+		return normalized;
+	};
+
+	const withIeeeReferenceIndex = (value: string, index: number): string => {
+		const normalized = value.trim();
+		if (!normalized) {
+			return `[${index}]`;
+		}
+
+		if (IEEE_INDEX_PREFIX_PATTERN.test(normalized)) {
+			return normalized.replace(IEEE_INDEX_PREFIX_PATTERN, `[${index}] `);
+		}
+
+		return `[${index}] ${normalized}`;
+	};
 
 	const toReferenceSegments = (value: string): CitationTextSegment[] => {
 		const segments: CitationTextSegment[] = [];
@@ -146,15 +204,92 @@
 		return html;
 	};
 
-	const referenceEntries = $derived(
-		citations.filter((item) => !item.isGenerating).map((item) => item.referenceCitation)
+	const citationsForDisplay = $derived(
+		((): CitationDisplayRow[] => {
+			let ieeeIndex = 1;
+
+			return citations.map((item) => {
+				if (item.isGenerating || item.style !== 'IEEE') {
+					return {
+						...item,
+						displayInTextCitation: item.inTextCitation,
+						displayReferenceCitation: item.referenceCitation
+					};
+				}
+
+				const displayInTextCitation = withIeeeInTextIndex(item.inTextCitation, ieeeIndex);
+				const displayReferenceCitation = withIeeeReferenceIndex(item.referenceCitation, ieeeIndex);
+				ieeeIndex += 1;
+
+				return {
+					...item,
+					displayInTextCitation,
+					displayReferenceCitation
+				};
+			});
+		})()
 	);
 
-	const referenceListPlain = $derived(referenceEntries.map((item) => stripItalicMarkers(item)).join('\n'));
+	const referenceRowsForCopy = $derived(citationsForDisplay.filter((item) => !item.isGenerating));
+
+	const referenceCopyStyle = $derived(
+		(() => {
+			if (referenceRowsForCopy.length === 0) {
+				return styleValue;
+			}
+
+			const firstStyle = referenceRowsForCopy[0]?.style || styleValue;
+			return referenceRowsForCopy.every((item) => item.style === firstStyle)
+				? firstStyle
+				: styleValue;
+		})()
+	);
+
+	const shouldSortReferencesForCopy = $derived(
+		shouldSortReferenceListForStyle(referenceCopyStyle)
+	);
+
+	const shouldUseHangingIndentForCopy = $derived(
+		shouldUseHangingIndentForStyle(referenceCopyStyle)
+	);
+
+	const referenceCopyParagraphStyle = $derived(
+		shouldUseHangingIndentForCopy
+			? 'margin: 0; padding-left: 1.27cm; text-indent: -1.27cm;'
+			: 'margin: 0;'
+	);
+
+	const referenceEntriesForCopy = $derived(
+		(() => {
+			const entries = referenceRowsForCopy.map((item) => item.displayReferenceCitation);
+			if (!shouldSortReferencesForCopy) {
+				return entries;
+			}
+
+			return entries
+				.map((entry, index) => ({ entry, index }))
+				.sort((left, right) => {
+					const compared = referenceSortCollator.compare(
+						getReferenceSortKey(left.entry),
+						getReferenceSortKey(right.entry)
+					);
+					if (compared !== 0) {
+						return compared;
+					}
+
+					return left.index - right.index;
+				})
+				.map((item) => item.entry);
+		})()
+	);
+
+	const referenceListPlain = $derived(
+		referenceEntriesForCopy.map((item) => stripItalicMarkers(item)).join('\n')
+	);
 
 	const referenceListHtml = $derived(
-		`<div>${referenceEntries
-			.map((item) => `<p style="margin: 0;">${formatReferenceCitationHtml(item)}</p>`)
+		`<div>${referenceEntriesForCopy
+			.map((item) => `<p style="${referenceCopyParagraphStyle}">${formatReferenceCitationHtml(item)}</p>`)
 			.join('')}</div>`
 	);
 
@@ -268,6 +403,56 @@
 			.filter((item): item is CitationRow => item !== null);
 	};
 
+	const REGENERATE_REVEAL_DELAY_MS = 180;
+
+	const waitFor = async (milliseconds: number): Promise<void> => {
+		if (milliseconds <= 0) {
+			return;
+		}
+
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, milliseconds);
+		});
+	};
+
+	const applyRegeneratedRowsSequentially = async (regeneratedRows: CitationRow[]): Promise<void> => {
+		if (regeneratedRows.length === 0) {
+			citations = citations.map((item) => ({ ...item, isGenerating: false }));
+			return;
+		}
+
+		const regeneratedById = new Map(regeneratedRows.map((item) => [String(item.id), item]));
+		const revealOrder = citations
+			.map((item) => String(item.id))
+			.filter((citationId) => regeneratedById.has(citationId));
+
+		for (const citationId of revealOrder) {
+			const regenerated = regeneratedById.get(citationId);
+			if (!regenerated) {
+				continue;
+			}
+
+			citations = citations.map((item) =>
+				String(item.id) === citationId ? regenerated : item
+			);
+
+			await waitFor(REGENERATE_REVEAL_DELAY_MS);
+		}
+
+		citations = citations.map((item) => {
+			const regenerated = regeneratedById.get(String(item.id));
+			if (regenerated) {
+				return regenerated;
+			}
+
+			if (item.isGenerating) {
+				return { ...item, isGenerating: false };
+			}
+
+			return item;
+		});
+	};
+
 	const isEditingCitation = (id: number | string): boolean =>
 		editingCitationId !== null && String(editingCitationId) === String(id);
 
@@ -323,6 +508,10 @@
 
 	const closeCitationDialog = (): void => {
 		isCitationComposerOpen = false;
+	};
+
+	const closeReferencePreviewDialog = (): void => {
+		isReferencePreviewOpen = false;
 	};
 
 	const closeDeleteConfirm = (): void => {
@@ -414,14 +603,34 @@
 								action="?/updateCitationStyle"
 								use:enhance={({ formData }) => {
 									const selectedMode = String(formData.get('styleUpdateMode') ?? 'style-only');
+									const previousGeneratingState = new Map(
+										citations.map((item) => [String(item.id), Boolean(item.isGenerating)])
+									);
+									const restoreGeneratingState = () => {
+										citations = citations.map((item) => ({
+											...item,
+											isGenerating: previousGeneratingState.get(String(item.id)) ?? false
+										}));
+									};
 									const announceId = toast.loading(
 										selectedMode === 'regenerate-all'
-											? 'Updating style and re-generating citations (Semantic Scholar cooldown: 1s/request)...'
+											? 'Updating style and re-generating citations...'
 											: 'Updating citation style...'
 									);
 
+									if (selectedMode === 'regenerate-all') {
+										citations = citations.map((item) => ({
+											...item,
+											isGenerating: true
+										}));
+									}
+
 									return async ({ result, update }) => {
 										if (result.type === 'failure') {
+											if (selectedMode === 'regenerate-all') {
+												restoreGeneratingState();
+											}
+
 											updateCitationQuotaFromAction(result.data);
 											toast.error(getMessage(result.data, 'Unable to update citation style.'), {
 												id: announceId
@@ -437,7 +646,9 @@
 											if (selectedMode === 'regenerate-all') {
 												const regeneratedCitations = mapGeneratedCitations(payload?.generatedCitations);
 												if (regeneratedCitations.length > 0) {
-													citations = regeneratedCitations;
+													await applyRegeneratedRowsSequentially(regeneratedCitations);
+												} else {
+													restoreGeneratingState();
 												}
 											}
 
@@ -457,6 +668,10 @@
 
 											await update();
 											return;
+										}
+
+										if (selectedMode === 'regenerate-all') {
+											restoreGeneratingState();
 										}
 
 										toast.error('Unable to update citation style.', { id: announceId });
@@ -609,7 +824,7 @@
 							type="button"
 							size="sm"
 							variant="outline"
-							onclick={() => copyText(referenceListPlain, 'Reference list', referenceListHtml)}
+							onclick={() => (isReferencePreviewOpen = true)}
 						>
 							Copy references
 						</Button>
@@ -638,13 +853,16 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each citations as item (item.id)}
+								{#each citationsForDisplay as item (item.id)}
 									<tr class="border-t border-border/60 align-top">
 										<td class="px-3 py-2">
-											<p class="font-medium">{item.sourceName}</p>
 											{#if item.isGenerating}
-												<p class="mt-1 text-xs text-muted-foreground">Generating...</p>
+												<div class="space-y-2">
+													<Skeleton class="h-4 w-36" />
+													<Skeleton class="h-3 w-24" />
+												</div>
 											{:else}
+												<p class="font-medium">{item.sourceName}</p>
 												<p class="mt-1 text-xs text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</p>
 											{/if}
 										</td>
@@ -656,7 +874,14 @@
 											{/if}
 										</td>
 										<td class="px-3 py-2">
-											<p class="max-w-md whitespace-pre-wrap wrap-break-word text-sm">{item.rawText}</p>
+											{#if item.isGenerating}
+												<div class="space-y-2">
+													<Skeleton class="h-4 w-72 max-w-md" />
+													<Skeleton class="h-4 w-56 max-w-md" />
+												</div>
+											{:else}
+												<p class="max-w-md whitespace-pre-wrap wrap-break-word text-sm">{item.rawText}</p>
+											{/if}
 										</td>
 										<td class="px-3 py-2">
 											{#if item.isGenerating}
@@ -668,9 +893,9 @@
 												<button
 													type="button"
 													class="rounded-md px-2 py-1 text-left transition-colors hover:bg-secondary"
-													onclick={() => copyText(item.inTextCitation, 'In-text citation')}
+													onclick={() => copyText(item.displayInTextCitation, 'In-text citation')}
 												>
-													{item.inTextCitation}
+													{item.displayInTextCitation}
 												</button>
 											{/if}
 										</td>
@@ -686,14 +911,14 @@
 													class="rounded-md px-2 py-1 text-left transition-colors hover:bg-secondary"
 													onclick={() =>
 														copyText(
-															stripItalicMarkers(item.referenceCitation),
+															stripItalicMarkers(item.displayReferenceCitation),
 															'Reference citation',
-															formatReferenceCitationHtml(item.referenceCitation)
+															formatReferenceCitationHtml(item.displayReferenceCitation)
 														)
 													}
 												>
 														<span class="whitespace-pre-wrap wrap-break-word">
-															{#each toReferenceSegments(item.referenceCitation) as segment, index (`${item.id}-${index}`)}
+															{#each toReferenceSegments(item.displayReferenceCitation) as segment, index (`${item.id}-${index}`)}
 																{#if segment.italic}
 																	<em>{segment.text}</em>
 																{:else}
@@ -771,7 +996,20 @@
 														<input type="hidden" name="citationId" value={item.id} />
 														<Button type="submit" size="sm" variant="outline">Regenerate</Button>
 													</form>
-													<Button type="button" size="sm" variant="outline" onclick={() => openCitationEditor(item)}>
+													<Button
+														type="button"
+														size="sm"
+														variant="outline"
+														onclick={() => {
+															const rawCitation = citations.find(
+																(entry) => String(entry.id) === String(item.id)
+															);
+
+															if (rawCitation) {
+																openCitationEditor(rawCitation);
+															}
+														}}
+													>
 														Edit
 													</Button>
 													<form
@@ -1007,6 +1245,100 @@
 						{:else}
 							<p class="text-sm text-muted-foreground">You can view collaborators but cannot send invites.</p>
 						{/if}
+					</section>
+				</div>
+			</div>
+		{/if}
+
+		{#if isReferencePreviewOpen}
+			<div
+				class="fixed inset-0 z-50 bg-background/65 backdrop-blur-sm"
+				role="dialog"
+				tabindex="-1"
+				aria-modal="true"
+				aria-label="Reference list preview"
+				onclick={(event) => {
+					if (event.target === event.currentTarget) {
+						closeReferencePreviewDialog();
+					}
+				}}
+				onkeydown={(event) => {
+					if (event.key === 'Escape') {
+						closeReferencePreviewDialog();
+					}
+				}}
+				in:fade={{ duration: 140 }}
+				out:fade={{ duration: 120 }}
+			>
+				<div class="mx-auto flex min-h-full w-full max-w-4xl items-center justify-center p-4 sm:p-6 lg:p-8">
+					<section
+						class="w-full max-w-3xl rounded-2xl border border-border/60 bg-card p-4 shadow-2xl sm:p-5"
+						in:scale={{ duration: 160, start: 0.96 }}
+						out:scale={{ duration: 120, start: 0.96 }}
+					>
+						<div class="mb-4 flex items-center justify-between gap-3">
+							<div>
+								<p class="font-heading text-lg font-semibold tracking-tight">Reference list preview</p>
+								<p class="text-sm text-muted-foreground">Style: {referenceCopyStyle}</p>
+							</div>
+							<Button type="button" variant="ghost" size="sm" onclick={closeReferencePreviewDialog}>
+								Close
+							</Button>
+						</div>
+
+						{#if referenceEntriesForCopy.length === 0}
+							<p class="rounded-xl border border-dashed border-border/70 bg-background/50 p-4 text-sm text-muted-foreground">
+								No references available to copy.
+							</p>
+						{:else}
+							<div class="max-h-[58vh] overflow-y-auto rounded-xl border border-border/60 bg-background/50 p-3">
+								<div class="grid gap-2">
+									{#each referenceEntriesForCopy as entry, index (`reference-preview-${index}`)}
+										<p
+											class="whitespace-pre-wrap wrap-break-word text-sm leading-6"
+											style={referenceCopyParagraphStyle}
+										>
+											{#each toReferenceSegments(entry) as segment, segmentIndex (`reference-preview-segment-${index}-${segmentIndex}`)}
+												{#if segment.italic}
+													<em>{segment.text}</em>
+												{:else}
+													{segment.text}
+												{/if}
+											{/each}
+										</p>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
+						<div class="mt-4 flex flex-wrap items-center justify-between gap-2">
+							<div class="text-xs text-muted-foreground">
+								<p>
+									{#if shouldSortReferencesForCopy}
+										Sorted alphabetically for copy output.
+									{:else}
+										Order preserved for copy output.
+									{/if}
+								</p>
+								{#if shouldUseHangingIndentForCopy}
+									<p>Hanging indent applied at 0.5 in (1.27 cm).</p>
+								{/if}
+							</div>
+							<div class="flex items-center gap-2">
+								<Button type="button" variant="outline" size="sm" onclick={closeReferencePreviewDialog}>
+									Cancel
+								</Button>
+								<Button
+									type="button"
+									size="sm"
+									onclick={async () => {
+										await copyText(referenceListPlain, 'Reference list', referenceListHtml);
+									}}
+								>
+									Copy references
+								</Button>
+							</div>
+						</div>
 					</section>
 				</div>
 			</div>

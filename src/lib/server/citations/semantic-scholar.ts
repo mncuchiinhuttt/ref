@@ -821,29 +821,46 @@ const formatReferenceAPA = (args: {
 	const lead = authorText ? `${authorText} (${args.year}).` : `${args.title} (${args.year}).`;
 	const safeTitle = stripTrailingPeriod(args.title);
 	const safeContainer = stripTrailingPeriod(args.containerTitle);
+	const containerItalic = safeContainer ? italicizeMarkdown(safeContainer) : '';
+	const link = args.link ? ` ${args.link}` : '';
 
 	if (args.sourceType === 'Conference Papers') {
-		const inVenue = safeContainer ? ` In ${safeContainer}.` : '';
-		const link = args.link ? ` ${args.link}` : '';
+		const inVenue = containerItalic ? ` In ${containerItalic}.` : '';
 		return `${lead} ${safeTitle}.${inVenue}${link}`.trim();
 	}
 
 	if (args.sourceType === 'Books') {
 		const publisherPart = safeContainer ? ` ${safeContainer}.` : '';
-		const link = args.link ? ` ${args.link}` : '';
-		return `${lead} ${safeTitle}.${publisherPart}${link}`.trim();
+		if (authorText) {
+			return `${lead} ${italicizeMarkdown(safeTitle)}.${publisherPart}${link}`.trim();
+		}
+
+		return `${italicizeMarkdown(safeTitle)} (${args.year}).${publisherPart}${link}`.trim();
+	}
+
+	if (args.sourceType === 'Theses & Dissertations') {
+		const institutionPart = safeContainer ? `, ${safeContainer}` : '';
+		const thesisPart = `[Thesis${institutionPart}]`;
+
+		if (authorText) {
+			return `${authorText} (${args.year}). ${italicizeMarkdown(safeTitle)}. ${thesisPart}.${link}`
+				.replace(/\s+/g, ' ')
+				.trim();
+		}
+
+		return `${italicizeMarkdown(safeTitle)} (${args.year}). ${thesisPart}.${link}`
+			.replace(/\s+/g, ' ')
+			.trim();
 	}
 
 	if (args.sourceType === 'Dataset') {
-		const repoPart = safeContainer ? ` ${safeContainer}.` : '';
-		const link = args.link ? ` ${args.link}` : '';
+		const repoPart = containerItalic ? ` ${containerItalic}.` : '';
 		return `${lead} ${safeTitle} [Data set].${repoPart}${link}`.trim();
 	}
 
 	const volumePages = [args.volume, args.pages].filter(Boolean).join(', ');
-	const journalPart = safeContainer ? ` ${safeContainer}` : '';
+	const journalPart = containerItalic ? ` ${containerItalic}` : '';
 	const volumePart = volumePages ? `, ${volumePages}` : '';
-	const link = args.link ? ` ${args.link}` : '';
 	return `${lead} ${safeTitle}.${journalPart}${volumePart}.${link}`.trim();
 };
 
@@ -868,22 +885,31 @@ const formatReferenceMLA = (args: {
 	const lead = authorText ? `${authorText} ` : '';
 	const titleText = `"${stripTrailingPeriod(args.title)}."`;
 	const container = stripTrailingPeriod(args.containerTitle);
+	const containerItalic = container ? italicizeMarkdown(container) : '';
 
 	if (args.sourceType === 'Conference Papers') {
-		const venuePart = container ? `${container}, ` : '';
+		const venuePart = containerItalic ? `${containerItalic}, ` : '';
 		const linkPart = args.link ? `, ${args.link}` : '';
 		return `${lead}${titleText} ${venuePart}${args.year}${linkPart}.`.replace(/\s+/g, ' ').trim();
 	}
 
 	if (args.sourceType === 'Books') {
 		const publisherPart = container ? `${container}, ` : '';
-		return `${lead}${stripTrailingPeriod(args.title)}. ${publisherPart}${args.year}.`
+		return `${lead}${italicizeMarkdown(stripTrailingPeriod(args.title))}. ${publisherPart}${args.year}.`
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
+	if (args.sourceType === 'Theses & Dissertations') {
+		const institutionPart = container ? `${container}, ` : '';
+		const linkPart = args.link ? `, ${args.link}` : '';
+		return `${lead}${italicizeMarkdown(stripTrailingPeriod(args.title))}. ${institutionPart}Thesis, ${args.year}${linkPart}.`
 			.replace(/\s+/g, ' ')
 			.trim();
 	}
 
 	const detailBits = [
-		container,
+		containerItalic,
 		args.volume ? `vol. ${args.volume}` : '',
 		args.pages ? `pp. ${args.pages}` : '',
 		args.year,
@@ -914,21 +940,30 @@ const formatReferenceChicago = (args: {
 	const lead = authorText ? `${authorText}. ` : '';
 	const title = `"${stripTrailingPeriod(args.title)}."`;
 	const container = stripTrailingPeriod(args.containerTitle);
+	const containerItalic = container ? italicizeMarkdown(container) : '';
 
 	if (args.sourceType === 'Conference Papers') {
-		const venue = container ? ` Paper presented at ${container},` : '';
+		const venue = containerItalic ? ` Paper presented at ${containerItalic},` : '';
 		const link = args.link ? ` ${args.link}.` : '';
 		return `${lead}${title}${venue} ${args.year}.${link}`.replace(/\s+/g, ' ').trim();
 	}
 
 	if (args.sourceType === 'Books') {
 		const publisher = container ? `${container}, ` : '';
-		return `${lead}${stripTrailingPeriod(args.title)}. ${publisher}${args.year}.`
+		return `${lead}${italicizeMarkdown(stripTrailingPeriod(args.title))}. ${publisher}${args.year}.`
 			.replace(/\s+/g, ' ')
 			.trim();
 	}
 
-	const journal = container ? ` ${container}` : '';
+	if (args.sourceType === 'Theses & Dissertations') {
+		const institution = container ? `, ${container}` : '';
+		const link = args.link ? ` ${args.link}.` : '';
+		return `${lead}${italicizeMarkdown(stripTrailingPeriod(args.title))}. Thesis${institution}, ${args.year}.${link}`
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
+	const journal = containerItalic ? ` ${containerItalic}` : '';
 	const volume = args.volume ? ` ${args.volume}` : '';
 	const pages = args.pages ? `: ${args.pages}` : '';
 	const link = args.link ? ` ${args.link}.` : '';
@@ -953,22 +988,28 @@ const formatReferenceIEEE = (args: {
 		: 'Unknown author';
 	const title = `"${stripTrailingPeriod(args.title)}"`;
 	const container = stripTrailingPeriod(args.containerTitle);
+	const containerItalic = container ? italicizeMarkdown(container) : '';
 	const doiPart = args.doi ? `, doi: ${args.doi}` : '';
 	const linkPart = !args.doi && args.link ? `, [Online]. Available: ${args.link}` : '';
 
 	if (args.sourceType === 'Conference Papers') {
-		const venue = container ? `, in ${container}` : '';
+		const venue = containerItalic ? `, in ${containerItalic}` : '';
 		return `[1] ${authorText}, ${title}${venue}, ${args.year}${doiPart}${linkPart}.`;
 	}
 
 	if (args.sourceType === 'Books') {
 		const publisher = container ? `${container}, ` : '';
-		return `[1] ${authorText}, ${stripTrailingPeriod(args.title)}. ${publisher}${args.year}${linkPart}.`;
+		return `[1] ${authorText}, ${italicizeMarkdown(stripTrailingPeriod(args.title))}. ${publisher}${args.year}${linkPart}.`;
+	}
+
+	if (args.sourceType === 'Theses & Dissertations') {
+		const institution = container ? `, ${container}` : '';
+		return `[1] ${authorText}, ${italicizeMarkdown(stripTrailingPeriod(args.title))}, Thesis${institution}, ${args.year}${doiPart}${linkPart}.`;
 	}
 
 	const volume = args.volume ? `, vol. ${args.volume}` : '';
 	const pages = args.pages ? `, pp. ${args.pages}` : '';
-	const journal = container ? `, ${container}` : '';
+	const journal = containerItalic ? `, ${containerItalic}` : '';
 	return `[1] ${authorText}, ${title}${journal}${volume}${pages}, ${args.year}${doiPart}${linkPart}.`;
 };
 
