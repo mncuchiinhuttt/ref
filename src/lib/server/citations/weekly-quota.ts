@@ -3,13 +3,17 @@ import { db } from '$lib/server/db';
 import {
 	citationGenerationEvent,
 	citationQuotaOverride,
-	citationQuotaRequest
+	citationQuotaRequest,
+	user as authUser
 } from '$lib/server/db/schema';
 
 export const BASE_WEEKLY_CITATION_LIMIT = 100;
+export const RMIT_STUDENT_WEEKLY_CITATION_LIMIT = 200;
 export const MAX_EXPANSION_WEEKS = 12;
 export const MAX_ADDITIONAL_PER_WEEK = 1_000;
 export const DEFAULT_ADDITIONAL_PER_WEEK = 100;
+
+const RMIT_EMAIL_DOMAINS = new Set(['rmit.edu.vn', 'rmit.edu.au']);
 
 export type CitationQuotaState = {
 	isLimited: boolean;
@@ -50,6 +54,30 @@ const weekStartUtc = (date: Date): Date => {
 	return start;
 };
 
+const toEmailDomain = (email: string | null | undefined): string => {
+	const normalized = email?.trim().toLowerCase() ?? '';
+	if (!normalized || !normalized.includes('@')) {
+		return '';
+	}
+
+	const atIndex = normalized.lastIndexOf('@');
+	return atIndex >= 0 ? normalized.slice(atIndex + 1) : '';
+};
+
+export const hasRmitEmailDomain = (email: string | null | undefined): boolean =>
+	RMIT_EMAIL_DOMAINS.has(toEmailDomain(email));
+
+const resolveBaseWeeklyLimit = (args: {
+	isFromRmit?: boolean | null;
+	email?: string | null;
+}): number => {
+	if (args.isFromRmit && hasRmitEmailDomain(args.email)) {
+		return RMIT_STUDENT_WEEKLY_CITATION_LIMIT;
+	}
+
+	return BASE_WEEKLY_CITATION_LIMIT;
+};
+
 export const getWeekWindowUtc = (date = new Date(), weekOffset = 0): { weekStart: Date; weekEnd: Date } => {
 	const weekStart = weekStartUtc(date);
 	weekStart.setUTCDate(weekStart.getUTCDate() + weekOffset * 7);
@@ -70,11 +98,17 @@ const getPendingRequestCount = async (userId: string): Promise<number> => {
 export const getCitationQuotaState = async (args: {
 	userId: string;
 	role: string;
+	isFromRmit?: boolean | null;
+	email?: string | null;
 	now?: Date;
 }): Promise<CitationQuotaState> => {
 	const now = args.now ?? new Date();
 	const { weekStart, weekEnd } = getWeekWindowUtc(now);
 	const isLimited = args.role === 'user';
+	const baseWeeklyLimit = resolveBaseWeeklyLimit({
+		isFromRmit: args.isFromRmit,
+		email: args.email
+	});
 
 	const [usageRows, pendingRequestCount] = await Promise.all([
 		db
@@ -123,7 +157,7 @@ export const getCitationQuotaState = async (args: {
 		.orderBy(desc(citationQuotaOverride.weeklyLimit))
 		.limit(1);
 
-	const weeklyLimit = toInt(activeOverride?.weeklyLimit, BASE_WEEKLY_CITATION_LIMIT);
+	const weeklyLimit = toInt(activeOverride?.weeklyLimit, baseWeeklyLimit);
 	const remainingThisWeek = Math.max(0, weeklyLimit - usedThisWeek);
 
 	return {
@@ -147,9 +181,16 @@ export const getCitationQuotaState = async (args: {
 export const ensureCanGenerateCitations = async (args: {
 	userId: string;
 	role: string;
+	isFromRmit?: boolean | null;
+	email?: string | null;
 	requestedCount: number;
 }): Promise<{ allowed: boolean; message: string; quota: CitationQuotaState }> => {
-	const quota = await getCitationQuotaState({ userId: args.userId, role: args.role });
+	const quota = await getCitationQuotaState({
+		userId: args.userId,
+		role: args.role,
+		isFromRmit: args.isFromRmit,
+		email: args.email
+	});
 	if (!quota.isLimited) {
 		return {
 			allowed: true,
@@ -168,11 +209,12 @@ export const ensureCanGenerateCitations = async (args: {
 	}
 
 	const remaining = quota.remainingThisWeek ?? 0;
+	const effectiveLimit = quota.weeklyLimit ?? resolveBaseWeeklyLimit(args);
 	return {
 		allowed: false,
 		message:
 			remaining <= 0
-				? 'Weekly citation generation limit reached (100/week for user role unless expanded).'
+				? `Weekly citation generation limit reached (${effectiveLimit}/week for user role unless expanded).`
 				: `Weekly citation generation limit exceeded. Remaining this week: ${remaining}.`,
 		quota
 	};
@@ -269,8 +311,22 @@ export const applyApprovedExpansionRequest = async (args: {
 	}
 
 	const requestedWeeks = Math.max(1, Math.min(MAX_EXPANSION_WEEKS, requestRow.requestedWeeks));
+	const [requestingUser] = await db
+		.select({
+			isFromRmit: authUser.isFromRmit,
+			email: authUser.email
+		})
+		.from(authUser)
+		.where(eq(authUser.id, requestRow.userId))
+		.limit(1);
+
+	const baseWeeklyLimit = resolveBaseWeeklyLimit({
+		isFromRmit: requestingUser?.isFromRmit,
+		email: requestingUser?.email
+	});
+
 	const weeklyLimit =
-		BASE_WEEKLY_CITATION_LIMIT +
+		baseWeeklyLimit +
 		Math.max(1, Math.min(MAX_ADDITIONAL_PER_WEEK, requestRow.additionalPerWeek));
 	const now = new Date();
 

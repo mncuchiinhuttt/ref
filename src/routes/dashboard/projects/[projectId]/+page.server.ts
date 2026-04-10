@@ -41,6 +41,18 @@ const isCitationStyle = (value: string): value is (typeof CITATION_STYLES)[numbe
 	return (CITATION_STYLES as readonly string[]).includes(value);
 };
 
+const quotaContextFromUser = (user: {
+	id: string;
+	role?: string | null;
+	isFromRmit?: boolean | null;
+	email?: string | null;
+}) => ({
+	userId: user.id,
+	role: user.role ?? 'user',
+	isFromRmit: user.isFromRmit ?? false,
+	email: user.email ?? ''
+});
+
 const getProjectAccess = async (projectId: number, userId: string) => {
 	const [projectRow] = await db
 		.select({
@@ -212,10 +224,7 @@ export const load: PageServerLoad = async (event) => {
 		.where(eq(citation.projectId, projectId))
 		.orderBy(desc(citation.createdAt));
 
-	const citationQuota = await getCitationQuotaState({
-		userId: event.locals.user.id,
-		role: event.locals.user.role ?? 'user'
-	});
+	const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 	return {
 		user: {
@@ -339,10 +348,7 @@ export const actions: Actions = {
 		const shouldRegenerateAll = styleUpdateMode === 'regenerate-all';
 
 		if (!shouldRegenerateAll) {
-			const citationQuota = await getCitationQuotaState({
-				userId: event.locals.user.id,
-				role: event.locals.user.role ?? 'user'
-			});
+			const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 			await db
 				.update(project)
@@ -374,8 +380,7 @@ export const actions: Actions = {
 			.orderBy(asc(citation.createdAt));
 
 		const generationAllowance = await ensureCanGenerateCitations({
-			userId: event.locals.user.id,
-			role: event.locals.user.role ?? 'user',
+			...quotaContextFromUser(event.locals.user),
 			requestedCount: existingCitations.length
 		});
 
@@ -388,10 +393,7 @@ export const actions: Actions = {
 		}
 
 		if (existingCitations.length === 0) {
-			const citationQuota = await getCitationQuotaState({
-				userId: event.locals.user.id,
-				role: event.locals.user.role ?? 'user'
-			});
+			const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 			await db
 				.update(project)
@@ -515,10 +517,7 @@ export const actions: Actions = {
 			metadata: `style=${style}`
 		});
 
-		const citationQuota = await getCitationQuotaState({
-			userId: event.locals.user.id,
-			role: event.locals.user.role ?? 'user'
-		});
+		const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 		return {
 			activeForm: 'style',
@@ -649,8 +648,7 @@ export const actions: Actions = {
 		}
 
 		const generationAllowance = await ensureCanGenerateCitations({
-			userId: event.locals.user.id,
-			role: event.locals.user.role ?? 'user',
+			...quotaContextFromUser(event.locals.user),
 			requestedCount: sourceLines.length
 		});
 
@@ -730,10 +728,7 @@ export const actions: Actions = {
 			metadata: `style=${access.project.citationStyle}`
 		});
 
-		const citationQuota = await getCitationQuotaState({
-			userId: event.locals.user.id,
-			role: event.locals.user.role ?? 'user'
-		});
+		const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 		return {
 			activeForm: 'citations',
@@ -912,8 +907,7 @@ export const actions: Actions = {
 		}
 
 		const generationAllowance = await ensureCanGenerateCitations({
-			userId: event.locals.user.id,
-			role: event.locals.user.role ?? 'user',
+			...quotaContextFromUser(event.locals.user),
 			requestedCount: 1
 		});
 
@@ -1000,10 +994,7 @@ export const actions: Actions = {
 			metadata: `citationId=${citationId};style=${access.project.citationStyle}`
 		});
 
-		const citationQuota = await getCitationQuotaState({
-			userId: event.locals.user.id,
-			role: event.locals.user.role ?? 'user'
-		});
+		const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 		return {
 			activeForm: 'regenerateCitation',

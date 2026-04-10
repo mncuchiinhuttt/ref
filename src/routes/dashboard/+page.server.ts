@@ -14,6 +14,7 @@ import {
 	createExpansionRequest,
 	DEFAULT_ADDITIONAL_PER_WEEK,
 	getCitationQuotaState,
+	hasRmitEmailDomain,
 	MAX_ADDITIONAL_PER_WEEK,
 	MAX_EXPANSION_WEEKS
 } from '$lib/server/citations/weekly-quota';
@@ -59,7 +60,26 @@ export const load: PageServerLoad = async (event) => {
 		return redirect(302, '/auth');
 	}
 
-	const currentUser = event.locals.user;
+	let currentUser = event.locals.user;
+	let rmitBonusApplied = false;
+
+	const isUserRole = (currentUser.role ?? 'user') === 'user';
+	const isEligibleRmitEmail = hasRmitEmailDomain(currentUser.email);
+	if (isUserRole && isEligibleRmitEmail && !currentUser.isFromRmit) {
+		await db
+			.update(authUser)
+			.set({
+				isFromRmit: true
+			})
+			.where(eq(authUser.id, currentUser.id));
+
+		currentUser = {
+			...currentUser,
+			isFromRmit: true
+		};
+		event.locals.user = currentUser;
+		rmitBonusApplied = true;
+	}
 
 	const ownProjectRows = await db
 		.select({
@@ -179,10 +199,13 @@ export const load: PageServerLoad = async (event) => {
 
 	const quota = await getCitationQuotaState({
 		userId: currentUser.id,
-		role: currentUser.role ?? 'user'
+		role: currentUser.role ?? 'user',
+		isFromRmit: currentUser.isFromRmit,
+		email: currentUser.email
 	});
 
 	return {
+		rmitBonusApplied,
 		user: {
 			id: currentUser.id,
 			email: currentUser.email,
@@ -190,7 +213,8 @@ export const load: PageServerLoad = async (event) => {
 			image: currentUser.image,
 			username: currentUser.username ?? null,
 			displayUsername: currentUser.displayUsername ?? null,
-			role: currentUser.role ?? 'user'
+			role: currentUser.role ?? 'user',
+			isFromRmit: Boolean(currentUser.isFromRmit)
 		},
 		citationQuota: quota,
 		projects,

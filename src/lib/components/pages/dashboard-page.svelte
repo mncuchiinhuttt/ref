@@ -47,6 +47,7 @@
 	};
 
 	type DashboardData = {
+		rmitBonusApplied: boolean;
 		user: {
 			id: string;
 			email: string;
@@ -55,6 +56,7 @@
 			username?: string | null;
 			displayUsername?: string | null;
 			role?: 'user' | 'admin';
+			isFromRmit?: boolean;
 		};
 		citationQuota: {
 			isLimited: boolean;
@@ -82,8 +84,15 @@
 	};
 
 	let { data, form }: { data: DashboardData; form?: DashboardFormState } = $props();
+	let isRmitBonusDialogOpen = $state(false);
 	let isSettingsDialogOpen = $state(false);
 	let isEditingAccount = $state(false);
+
+	$effect(() => {
+		if (data.rmitBonusApplied) {
+			isRmitBonusDialogOpen = true;
+		}
+	});
 
 	const isAccountFormState = $derived(form?.formName === 'updateAccount');
 	const accountNameInput = $derived(
@@ -130,6 +139,10 @@
 	const openSettingsDialog = (): void => {
 		isSettingsDialogOpen = true;
 		isEditingAccount = false;
+	};
+
+	const closeRmitBonusDialog = (): void => {
+		isRmitBonusDialogOpen = false;
 	};
 
 	const closeSettingsDialog = (): void => {
@@ -210,7 +223,14 @@
 				{#if data.citationQuota.isLimited}
 					<div class="grid gap-2">
 						<div class="flex items-center justify-between text-sm">
-							<p class="font-medium">{data.citationQuota.usedThisWeek} / {data.citationQuota.weeklyLimit} citations used</p>
+							<p class="font-medium">
+								{data.citationQuota.usedThisWeek} / {data.citationQuota.weeklyLimit} citations used
+								{#if data.user.isFromRmit && data.citationQuota.weeklyLimit === 200}
+									<span class="font-normal text-muted-foreground">
+										(includes 100 bonus citations for RMIT students 🎉)
+									</span>
+								{/if}
+							</p>
 							<p class="text-muted-foreground">{data.citationQuota.remainingThisWeek} remaining</p>
 						</div>
 						<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -416,6 +436,53 @@
 			</CardContent>
 		</Card>
 	</main>
+
+	{#if isRmitBonusDialogOpen}
+		<div
+			class="fixed inset-0 z-60 bg-background/65 backdrop-blur-sm"
+			role="dialog"
+			tabindex="-1"
+			aria-modal="true"
+			aria-label="RMIT student special program"
+			onclick={(event) => {
+				if (event.target === event.currentTarget) {
+					closeRmitBonusDialog();
+				}
+			}}
+			onkeydown={(event) => {
+				if (event.key === 'Escape') {
+					closeRmitBonusDialog();
+				}
+			}}
+			in:fade={{ duration: 140 }}
+			out:fade={{ duration: 120 }}
+		>
+			<div class="mx-auto flex min-h-full w-full max-w-3xl items-center justify-center p-4 sm:p-6 lg:p-8">
+				<section
+					class="w-full max-w-lg rounded-2xl border border-border/60 bg-card p-5 shadow-2xl sm:p-6"
+					in:scale={{ duration: 160, start: 0.96 }}
+					out:scale={{ duration: 120, start: 0.96 }}
+				>
+					<div class="mb-3 inline-flex items-center rounded-full border border-amber-300/60 bg-amber-100/70 px-3 py-1 text-xs font-medium text-amber-900 dark:border-amber-400/40 dark:bg-amber-950/30 dark:text-amber-200">
+						RMIT Student Special Program
+					</div>
+					<h2 class="font-heading text-2xl font-semibold tracking-tight">Congratulations!</h2>
+					<p class="mt-2 text-sm text-muted-foreground sm:text-base">
+						You signed up with an RMIT email, so we upgraded your weekly default citation limit from
+						<span class="font-semibold text-foreground">100</span> to
+						<span class="font-semibold text-foreground">200</span>.
+					</p>
+					<p class="mt-2 text-sm text-muted-foreground">
+						Enjoy the extra capacity and keep building your references with your team.
+					</p>
+
+					<div class="mt-5 flex items-center justify-end gap-2">
+						<Button type="button" size="sm" onclick={closeRmitBonusDialog}>Awesome, thanks</Button>
+					</div>
+				</section>
+			</div>
+		</div>
+	{/if}
 
 	{#if isSettingsDialogOpen}
 		<div
