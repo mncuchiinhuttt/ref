@@ -3,6 +3,7 @@ import type {
 	NormalizedSourceAuthor,
 	SourceType
 } from './source-metadata';
+import { isReportOrDatasetSourceType } from './source-types';
 
 export type NewsCitationStyle = 'APA' | 'MLA' | 'Chicago' | 'IEEE' | 'RMIT Harvard';
 
@@ -976,6 +977,17 @@ export const formatNewsOrMagazineCitation = (
 		quotePage?: string;
 	} = { style: 'APA' }
 ): NewsFormatterResult => {
+	if (isReportOrDatasetSourceType(context.sourceType)) {
+		return {
+			handled: false,
+			classification: 'other',
+			confidence: context.confidence,
+			missingFields: [],
+			warnings: [],
+			citation: null
+		};
+	}
+
 	const warnings: string[] = [];
 	const missingFields: string[] = [];
 

@@ -19,8 +19,7 @@ Source-type rules (APA 7):
 - Websites & Webpage: Author/Organization. (Year or n.d.). *Page title*. Site name. URL
 - Newspaper & Magazine Articles: Author. (Year, Month Day). Article title. *Publication title*. URL
 - Journal Articles: Author. (Year). Article title. *Journal title*, volume(issue), pages. DOI (preferred) or URL
-- Government Report: Government body. (Year). *Report title* (Report No. if available). Publisher. URL
-- Organization Report: Organization. (Year). *Report title*. Organization/Publisher. URL
+- Reports & datasets: Author/Organization. (Year). *Title* [Report or Data set]. Publisher/Repository. DOI/URL
 - Conference Papers: Author. (Year). Title. In *Conference/proceedings title* (pages if available). DOI/URL
 - Blog/Blog Post: Author. (Year, Month Day). Post title. *Blog name*. URL
 - Social Media Post: Author/Account. (Year, Month Day). First words of post [Post type]. Platform. URL
@@ -29,8 +28,7 @@ Source-type rules (APA 7):
 - Standards & Patents: Organization/Inventor. (Year). *Standard or patent title* (Standard/Patent No. if available). Publisher/Office. URL
 - Film, Movie, or TV: Creator. (Year). *Title* [Film/TV series/TV episode]. Studio/Network/Platform
 - Podcast: Host. (Year, Month Day). Episode title [Audio podcast episode]. In *Podcast title*. Network. URL
-- YouTube: Channel/Author. (Year, Month Day). *Video title* [Video]. YouTube. URL
-- Dataset: Author/Organization. (Year). *Dataset title* [Data set]. Repository. DOI/URL`,
+- YouTube: Channel/Author. (Year, Month Day). *Video title* [Video]. YouTube. URL`,
 	MLA: `You are a citation formatter for MLA 9.
 
 Use only the metadata provided.
@@ -51,8 +49,7 @@ Source-type rules (MLA 9):
 - Websites & Webpage: Author. "Page Title." *Website Name*, Publisher (if different), Day Month Year, URL.
 - Newspaper & Magazine Articles: Author. "Article Title." *Publication Name*, Day Month Year, URL.
 - Journal Articles: Author. "Article Title." *Journal Title*, vol. X, no. Y, Year, pp. xx-yy. DOI/URL.
-- Government Report: Government body. *Report Title*. Publisher/Department, Year, URL.
-- Organization Report: Organization. *Report Title*. Publisher, Year, URL.
+- Reports & datasets: Author/Organization. *Title*. Report or Data set, Publisher/Repository, Year, DOI/URL.
 - Conference Papers: Author. "Paper Title." *Conference/Proceedings Title*, Year, pages if available, DOI/URL.
 - Blog/Blog Post: Author. "Post Title." *Blog Name*, Day Month Year, URL.
 - Social Media Post: Author/Account. "Post text or title." *Platform*, Day Month Year, URL.
@@ -62,7 +59,6 @@ Source-type rules (MLA 9):
 - Film, Movie, or TV: *Title*. Directed by Name, performance credits if available, Studio/Distributor, Year.
 - Podcast: Host. "Episode Title." *Podcast Title*, Publisher/Network, Day Month Year, URL.
 - YouTube: Creator/Channel. "Video Title." *YouTube*, Day Month Year, URL.
-- Dataset: Author/Organization. *Dataset Title*. Version if available, Repository, Year, DOI/URL.
 `,
 	Chicago: `You are a citation formatter for Chicago style.
 
@@ -88,8 +84,7 @@ Source-type rules (Chicago):
 - Websites & Webpage: Author. "Page Title." *Site Name*. Accessed date when required. URL.
 - Newspaper & Magazine Articles: Author. "Article Title." *Publication Name*, Month Day, Year. URL.
 - Journal Articles: Author. "Article Title." *Journal Title* volume, no. issue (Year): pages. DOI/URL.
-- Government Report: Government body. *Report Title*. Place/Publisher if available, Year. URL.
-- Organization Report: Organization. *Report Title*. Publisher, Year. URL.
+- Reports & datasets: Author/Organization. *Title*. Report or Data set. Publisher/Repository, Year. DOI/URL.
 - Conference Papers: Author. "Paper Title." In *Conference/Proceedings Title*, pages if available. Year. DOI/URL.
 - Blog/Blog Post: Author. "Post Title." *Blog Name*, Month Day, Year. URL.
 - Social Media Post: Author/Account. "Post text/title." Platform, Month Day, Year. URL.
@@ -99,7 +94,6 @@ Source-type rules (Chicago):
 - Film, Movie, or TV: *Title*. Directed by Name. Studio/Network/Platform, Year.
 - Podcast: Host. "Episode Title." *Podcast Title*. Network/Publisher, Month Day, Year. URL.
 - YouTube: Creator/Channel. "Video Title." *YouTube*. Month Day, Year. URL.
-- Dataset: Author/Organization. *Dataset Title*. Repository, Year. DOI/URL.
 `,
 	IEEE: `You are a citation formatter for IEEE.
 
@@ -123,8 +117,7 @@ Source-type rules (IEEE):
 - Websites & Webpage: [n] Author/Organization, "Page title," *Website name*, Year/Date, [Online]. Available: URL.
 - Newspaper & Magazine Articles: [n] Author, "Article title," *Publication name*, Month Day, Year, [Online]. Available: URL.
 - Journal Articles: [n] Author, "Article title," *Journal title*, vol. X, no. Y, pp. xx-yy, Year, doi:...
-- Government Report: [n] Government body, *Report title*, report number if available, Year, [Online]. Available: URL.
-- Organization Report: [n] Organization, *Report title*, Year, [Online]. Available: URL.
+- Reports & datasets: [n] Author/Organization, *Title*, Report or Data set, Publisher/Repository, Year, doi:.../URL.
 - Conference Papers: [n] Author, "Paper title," in *Proceedings/Conference*, Year, pp. xx-yy, doi:.../URL.
 - Blog/Blog Post: [n] Author, "Post title," *Blog name*, Month Day, Year, [Online]. Available: URL.
 - Social Media Post: [n] Author/Account, "Post text/title," Platform, Month Day, Year. [Online]. Available: URL.
@@ -134,7 +127,6 @@ Source-type rules (IEEE):
 - Film, Movie, or TV: [n] *Title*, Director/Creator if available, Studio/Network/Platform, Year.
 - Podcast: [n] Host, "Episode title," *Podcast title*, Network, Month Day, Year. [Online]. Available: URL.
 - YouTube: [n] Creator/Channel, "Video title," *YouTube*, Month Day, Year. [Online]. Available: URL.
-- Dataset: [n] Author/Organization, *Dataset title*, Repository, Year, doi:.../URL.
 `,
 	'RMIT Harvard': `You are an RMIT Harvard citation formatter for an automatic referencing app.
 
@@ -228,7 +220,7 @@ You should support at minimum:
 - editedBookChapter
 - journalArticle
 - journalArticleOnline
-- report
+- reportsAndDatasets
 - webpage
 - webpageDocument
 - websiteHomepage
@@ -242,7 +234,6 @@ You should support at minimum:
 - streamingVideo
 - conferencePaper
 - thesis
-- dataset
 - unknownOnlineSource
 
 If the source does not fit exactly, choose the nearest valid RMIT Harvard source type and add a warning.
@@ -267,15 +258,18 @@ Choose book when metadata contains:
 - place of publication
 - book schema or book catalog metadata
 
-C. REPORT
-Choose report when metadata clearly indicates:
+C. REPORTS & DATASETS
+Choose reportsAndDatasets when metadata clearly indicates:
 - annual report
 - government report
 - institutional report
 - market report
 - industry report
 - report number
-Do not classify these as webpageDocument if they are actually reports.
+- dataset
+- data repository
+- statistical database
+Do not classify these as webpageDocument if they are actually reports or datasets.
 
 D. NEWS OR MAGAZINE WEB ARTICLE
 Choose newsWebArticle or magazineWebArticle when metadata contains:
@@ -296,7 +290,7 @@ If no person author exists, use the blog name in the author position where appro
 
 F. WEBPAGE DOCUMENT
 Choose webpageDocument for downloadable documents on a webpage, such as PDF or file-based documents,
-ONLY if the item is not better classified as a report, thesis, dataset, or another formal type.
+ONLY if the item is not better classified as reportsAndDatasets, thesis, or another formal type.
 Prefer landingPageUrl over direct file URL when available.
 
 G. WEBSITE HOMEPAGE
@@ -304,7 +298,7 @@ Choose websiteHomepage only when the source is clearly the homepage of a site an
 If the homepage has no meaningful title, use Homepage.
 
 H. WEBPAGE
-Choose webpage for a normal page on a website when it is not better classified as news, blog, report, webpageDocument, or homepage.
+Choose webpage for a normal page on a website when it is not better classified as news, blog, reportsAndDatasets, webpageDocument, or homepage.
 
 I. SOCIAL MEDIA POST
 Choose socialMediaPost when the source is a public post from platforms such as X/Twitter, Facebook, Instagram, LinkedIn, etc.
@@ -384,9 +378,14 @@ Rules:
 Pattern:
 Author FamilyName Initial, Author FamilyName Initial and Author FamilyName Initial (Year) 'Article Title', *Journal Title*, volume(issue):pages, doi:...
 
+Pattern when no person author is available:
+Journal Name (Year) 'Article Title', *Journal Title*, volume(issue):start page-end page, doi:...
+
 Rules:
 - Use journal title as the container.
-- Include volume, issue, pages, or article number when available.
+- Include locator as volume(issue):start page-end page when volume/issue/page metadata exists.
+- If start and end page are both available, output a page range start-end (for example 123-140).
+- If no person author exists, begin with the journal name (not italicized), then year.
 - Include DOI when available.
 - For DOI-based journal articles, do not add accessed date or URL.
 - For arXiv preprints with DOI, use arXiv as the container and include the DOI.
@@ -401,8 +400,14 @@ Rules:
 - Include edition only if not first.
 - Include DOI instead of place if the metadata and rule profile say so.
 
-8. REPORT
-Use the report template rather than webpageDocument when the source is clearly an annual report, government report, organisational report, ABS report, market report, or industry report.
+8. REPORTS & DATASETS
+Pattern:
+Author/Organisation (Year) Title, report or data set, Publisher/Repository website, accessed Day Month Year. URL
+
+Rules:
+- Use this grouped template for government reports, organisation reports, market/industry reports, and datasets.
+- Prefer "data set" when metadata indicates dataset or repository signals; otherwise use "report".
+- Do not format reportsAndDatasets items as webpageDocument unless no report/data-set signals exist.
 
 9. SOCIAL MEDIA POST
 Pattern:
@@ -447,7 +452,7 @@ Before returning, verify:
 - accessed date is included where needed
 - URL has no final period
 - DOI is used when appropriate
-- webpageDocument is not being wrongly used for a report
+- webpageDocument is not being wrongly used for reportsAndDatasets
 - homepage is not being used for a specific article page
 
 === FINAL BEHAVIOR ===
@@ -477,7 +482,8 @@ export const buildCitationSystemPrompt = (
 		'1) a concise in-text citation, and',
 		'2) a full reference list entry.',
 		'Return one output item per input source in the same order.',
-		'Preserve sourceType, sourceName, and sourceText unless impossible.',
+		'Preserve sourceType, sourceName, and sourceText exactly as provided; do not reclassify sourceType.',
+		'When sourceType is Reports & datasets, always use the Reports & datasets template, never a newspaper or magazine template.',
 		'Do not invent metadata if missing. Use placeholders like "n.d." only when style-appropriate.',
 		'Return JSON only and match the requested schema exactly.'
 	].join(' ');

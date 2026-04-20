@@ -67,7 +67,11 @@
 			key: 'citations',
 			label: 'Citations',
 			value: (entry: GenerationChartDatum): number => entry.citations,
-			color: 'var(--color-citations)'
+			color: 'hsl(var(--primary))',
+			props: {
+				line: { strokeWidth: 2 },
+				fillOpacity: 0.28
+			}
 		}
 	];
 
@@ -105,6 +109,102 @@
 		}
 		return fallback;
 	};
+
+	const OPEN_AI_PAGE_SIZE = 10;
+	const EXPANSION_REQUEST_PAGE_SIZE = 8;
+	const USERS_PAGE_SIZE = 10;
+
+	const getTotalPages = (totalItems: number, pageSize: number): number =>
+		Math.max(1, Math.ceil(totalItems / pageSize));
+
+	const clampPage = (page: number, totalPages: number): number =>
+		Math.min(Math.max(page, 1), Math.max(totalPages, 1));
+
+	const getPageWindow = (page: number, totalPages: number, maxButtons = 5): number[] => {
+		const safeTotal = Math.max(1, totalPages);
+		const safePage = clampPage(page, safeTotal);
+		const windowSize = Math.max(1, Math.min(maxButtons, safeTotal));
+		const halfWindow = Math.floor(windowSize / 2);
+
+		let start = safePage - halfWindow;
+		let end = safePage + halfWindow;
+
+		if (windowSize % 2 === 0) {
+			end -= 1;
+		}
+
+		if (start < 1) {
+			end += 1 - start;
+			start = 1;
+		}
+
+		if (end > safeTotal) {
+			start -= end - safeTotal;
+			end = safeTotal;
+		}
+
+		start = Math.max(1, start);
+
+		return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+	};
+
+	const getPageBounds = (totalItems: number, page: number, pageSize: number): { from: number; to: number } => {
+		if (totalItems <= 0) {
+			return { from: 0, to: 0 };
+		}
+
+		const safePage = clampPage(page, getTotalPages(totalItems, pageSize));
+		const from = (safePage - 1) * pageSize + 1;
+		const to = Math.min(totalItems, safePage * pageSize);
+
+		return { from, to };
+	};
+
+	let openAiPage = $state(1);
+	let expansionRequestPage = $state(1);
+	let usersPage = $state(1);
+
+	const openAiTotalPages = $derived(getTotalPages(data.openAiReviewRows.length, OPEN_AI_PAGE_SIZE));
+	const expansionRequestTotalPages = $derived(
+		getTotalPages(data.expansionRequests.length, EXPANSION_REQUEST_PAGE_SIZE)
+	);
+	const usersTotalPages = $derived(getTotalPages(data.users.length, USERS_PAGE_SIZE));
+
+	const openAiSafePage = $derived(clampPage(openAiPage, openAiTotalPages));
+	const expansionRequestSafePage = $derived(
+		clampPage(expansionRequestPage, expansionRequestTotalPages)
+	);
+	const usersSafePage = $derived(clampPage(usersPage, usersTotalPages));
+
+	const openAiReviewPageRows = $derived(
+		data.openAiReviewRows.slice(
+			(openAiSafePage - 1) * OPEN_AI_PAGE_SIZE,
+			openAiSafePage * OPEN_AI_PAGE_SIZE
+		)
+	);
+	const openAiPageNumbers = $derived(getPageWindow(openAiSafePage, openAiTotalPages));
+	const openAiPageBounds = $derived(
+		getPageBounds(data.openAiReviewRows.length, openAiSafePage, OPEN_AI_PAGE_SIZE)
+	);
+
+	const expansionRequestPageRows = $derived(
+		data.expansionRequests.slice(
+			(expansionRequestSafePage - 1) * EXPANSION_REQUEST_PAGE_SIZE,
+			expansionRequestSafePage * EXPANSION_REQUEST_PAGE_SIZE
+		)
+	);
+	const expansionRequestPageNumbers = $derived(
+		getPageWindow(expansionRequestSafePage, expansionRequestTotalPages)
+	);
+	const expansionRequestPageBounds = $derived(
+		getPageBounds(data.expansionRequests.length, expansionRequestSafePage, EXPANSION_REQUEST_PAGE_SIZE)
+	);
+
+	const usersPageRows = $derived(
+		data.users.slice((usersSafePage - 1) * USERS_PAGE_SIZE, usersSafePage * USERS_PAGE_SIZE)
+	);
+	const usersPageNumbers = $derived(getPageWindow(usersSafePage, usersTotalPages));
+	const usersPageBounds = $derived(getPageBounds(data.users.length, usersSafePage, USERS_PAGE_SIZE));
 </script>
 
 <div class="min-h-dvh bg-linear-to-b from-background via-background to-muted/20">
@@ -186,6 +286,112 @@
 								<span>Daily generation trend</span>
 							</div>
 						</div>
+				{/if}
+			</CardContent>
+		</Card>
+
+		<Card class="border-border/60 bg-card/80">
+			<CardHeader>
+				<CardTitle class="font-heading text-xl">OpenAI Citation Review Queue</CardTitle>
+				<CardDescription>
+					Citations that required OpenAI requests. Use this queue to identify candidates for logic-only improvements.
+				</CardDescription>
+			</CardHeader>
+			<CardContent class="grid gap-3">
+				<div class="text-xs text-muted-foreground">
+					Logged items: <span class="font-medium text-foreground">{data.openAiReviewCount}</span>
+				</div>
+				{#if data.openAiReviewRows.length === 0}
+					<p class="text-sm text-muted-foreground">No OpenAI-required citations have been logged yet.</p>
+				{:else}
+					<div class="overflow-x-auto rounded-xl border border-border/60">
+						<table class="min-w-full text-sm">
+							<thead class="bg-muted/50">
+								<tr>
+									<th class="px-3 py-2 text-left font-medium">When</th>
+									<th class="px-3 py-2 text-left font-medium">User</th>
+									<th class="px-3 py-2 text-left font-medium">Project</th>
+									<th class="px-3 py-2 text-left font-medium">Source</th>
+									<th class="px-3 py-2 text-left font-medium">Method</th>
+									<th class="px-3 py-2 text-left font-medium">Reason</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each openAiReviewPageRows as row (row.id)}
+									<tr class="border-t border-border/60 align-top">
+										<td class="px-3 py-2 text-xs text-muted-foreground">
+											<p>{shortDateTime(row.createdAt)}</p>
+											<p>{row.actionType}</p>
+											{#if row.citationId}
+												<p>Citation #{row.citationId}</p>
+											{/if}
+										</td>
+										<td class="px-3 py-2">
+											<p class="font-medium">{row.userName}</p>
+											<p class="text-xs text-muted-foreground">{row.userEmail}</p>
+										</td>
+										<td class="px-3 py-2 text-xs text-muted-foreground">
+											<p>{row.projectName}</p>
+											<p>{row.style}{row.mode ? ` (${row.mode})` : ''}</p>
+											{#if row.fromStyle}
+												<p>from {row.fromStyle}</p>
+											{/if}
+										</td>
+										<td class="px-3 py-2 text-xs text-muted-foreground">
+											<p class="font-medium text-foreground">{row.sourceName || '-'}</p>
+											<p>{row.sourceType || '-'}</p>
+											<p>{row.sourceText || '-'}</p>
+										</td>
+										<td class="px-3 py-2 text-xs text-muted-foreground">
+											{row.resolver || '-'}
+										</td>
+										<td class="px-3 py-2 text-xs text-muted-foreground">
+											{row.reason || '-'}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+					<div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+						<span>
+							Showing {openAiPageBounds.from}-{openAiPageBounds.to} of {data.openAiReviewRows.length}
+						</span>
+						{#if openAiTotalPages > 1}
+							<div class="flex items-center gap-1">
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={openAiSafePage <= 1}
+									onclick={() =>
+										(openAiPage = clampPage(openAiSafePage - 1, openAiTotalPages))}
+								>
+									Previous
+								</Button>
+								{#each openAiPageNumbers as pageNumber (pageNumber)}
+									<Button
+										type="button"
+										size="sm"
+										variant={openAiSafePage === pageNumber ? 'default' : 'ghost'}
+										onclick={() => (openAiPage = pageNumber)}
+									>
+										{pageNumber}
+									</Button>
+								{/each}
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={openAiSafePage >= openAiTotalPages}
+									onclick={() =>
+										(openAiPage = clampPage(openAiSafePage + 1, openAiTotalPages))}
+								>
+									Next
+								</Button>
+							</div>
+						{/if}
+					</div>
 				{/if}
 			</CardContent>
 		</Card>
@@ -293,7 +499,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each data.expansionRequests as request (request.id)}
+								{#each expansionRequestPageRows as request (request.id)}
 									<tr class="border-t border-border/60 align-top">
 										<td class="px-3 py-2">
 											<p class="font-medium">{request.userName}</p>
@@ -355,6 +561,51 @@
 							</tbody>
 						</table>
 					</div>
+					<div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+						<span>
+							Showing {expansionRequestPageBounds.from}-{expansionRequestPageBounds.to} of {data.expansionRequests.length}
+						</span>
+						{#if expansionRequestTotalPages > 1}
+							<div class="flex items-center gap-1">
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={expansionRequestSafePage <= 1}
+									onclick={() =>
+										(expansionRequestPage = clampPage(
+											expansionRequestSafePage - 1,
+											expansionRequestTotalPages
+										))}
+								>
+									Previous
+								</Button>
+								{#each expansionRequestPageNumbers as pageNumber (pageNumber)}
+									<Button
+										type="button"
+										size="sm"
+										variant={expansionRequestSafePage === pageNumber ? 'default' : 'ghost'}
+										onclick={() => (expansionRequestPage = pageNumber)}
+									>
+										{pageNumber}
+									</Button>
+								{/each}
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={expansionRequestSafePage >= expansionRequestTotalPages}
+									onclick={() =>
+										(expansionRequestPage = clampPage(
+											expansionRequestSafePage + 1,
+											expansionRequestTotalPages
+										))}
+								>
+									Next
+								</Button>
+							</div>
+						{/if}
+					</div>
 				{/if}
 			</CardContent>
 		</Card>
@@ -376,7 +627,7 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#each data.users as user (user.id)}
+							{#each usersPageRows as user (user.id)}
 								<tr class="border-t border-border/60 align-top">
 									<td class="px-3 py-2">
 										<p class="font-medium">{user.name}</p>
@@ -427,6 +678,41 @@
 							{/each}
 						</tbody>
 					</table>
+				</div>
+				<div class="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+					<span>Showing {usersPageBounds.from}-{usersPageBounds.to} of {data.users.length}</span>
+					{#if usersTotalPages > 1}
+						<div class="flex items-center gap-1">
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								disabled={usersSafePage <= 1}
+								onclick={() => (usersPage = clampPage(usersSafePage - 1, usersTotalPages))}
+							>
+								Previous
+							</Button>
+							{#each usersPageNumbers as pageNumber (pageNumber)}
+								<Button
+									type="button"
+									size="sm"
+									variant={usersSafePage === pageNumber ? 'default' : 'ghost'}
+									onclick={() => (usersPage = pageNumber)}
+								>
+									{pageNumber}
+								</Button>
+							{/each}
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								disabled={usersSafePage >= usersTotalPages}
+								onclick={() => (usersPage = clampPage(usersSafePage + 1, usersTotalPages))}
+							>
+								Next
+							</Button>
+						</div>
+					{/if}
 				</div>
 			</CardContent>
 		</Card>

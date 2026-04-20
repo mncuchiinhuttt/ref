@@ -1,10 +1,11 @@
 import { env } from '$env/dynamic/private';
+import { mapWithConcurrency } from './async-utils';
+import { getResearchGatePublicationInfo, type CitationSourceContext } from './source-metadata';
 import {
-	getResearchGatePublicationInfo,
+	isReportOrDatasetSourceType,
 	normalizeSourceTypeLabel,
-	type CitationSourceContext,
 	type SourceType
-} from './source-metadata';
+} from './source-types';
 
 const SEMANTIC_SCHOLAR_BASE_URL = 'https://api.semanticscholar.org/graph/v1';
 const SEMANTIC_SCHOLAR_TIMEOUT_MS = 8_000;
@@ -53,6 +54,7 @@ type SemanticScholarAuthor = {
 type SemanticScholarJournal = {
 	name?: string;
 	volume?: string;
+	issue?: string;
 	pages?: string;
 };
 
@@ -321,6 +323,27 @@ const joinWithAndWord = (items: string[]): string => {
 
 const stripTrailingPeriod = (value: string): string => value.replace(/[.\s]+$/g, '').trim();
 
+const buildVolumeIssuePages = (args: { volume: string; issue: string; pages: string }): string => {
+	const volume = compactWhitespace(args.volume);
+	const issue = compactWhitespace(args.issue);
+	const pages = compactWhitespace(args.pages);
+
+	let locator = '';
+	if (volume && issue) {
+		locator = `${volume}(${issue})`;
+	} else if (volume) {
+		locator = volume;
+	} else if (issue) {
+		locator = `(${issue})`;
+	}
+
+	if (pages) {
+		return locator ? `${locator}:${pages}` : pages;
+	}
+
+	return locator;
+};
+
 const italicizeMarkdown = (value: string): string => {
 	const normalized = compactWhitespace(value);
 	if (!normalized) {
@@ -356,17 +379,38 @@ const getDomain = (value: string): string => {
 	}
 };
 
+const isLikelyDatasetMetadata = (title: string, containerTitle: string, link: string): boolean => {
+	const combined = `${title} ${containerTitle} ${link}`.toLowerCase();
+	return /\b(data\s*set|dataset|data\s*repository|open\s*data|statistical\s+database|dataverse|figshare|zenodo|kaggle|csv|xlsx|json)\b/.test(
+		combined
+	);
+};
+
+const isLikelyDatasetContext = (context: CitationSourceContext): boolean =>
+	isLikelyDatasetMetadata(
+		`${context.sourceText} ${context.metadata.title}`,
+		context.metadata.containerTitle,
+		context.metadata.canonicalUrl || context.metadata.url
+	);
+
+const getReportDatasetLabel = (title: string, containerTitle: string, link: string): 'Report' | 'Data set' => {
+	return isLikelyDatasetMetadata(title, containerTitle, link) ? 'Data set' : 'Report';
+};
+
 const isLikelyScholarlySource = (context: CitationSourceContext): boolean => {
 	const doi = extractDoiFromContext(context);
 	if (doi) {
 		return true;
 	}
 
+	const isGroupedDataset =
+		isReportOrDatasetSourceType(context.sourceType) && isLikelyDatasetContext(context);
+
 	if (
 		context.sourceType === 'Journal Articles' ||
 		context.sourceType === 'Conference Papers' ||
 		context.sourceType === 'Theses & Dissertations' ||
-		context.sourceType === 'Dataset' ||
+		isGroupedDataset ||
 		context.sourceType === 'Books'
 	) {
 		return true;
@@ -487,7 +531,7 @@ const mapPaperSourceType = (paper: SemanticScholarPaper): SourceType => {
 	)}`.toLowerCase();
 
 	if (publicationTypes.some((value) => value.includes('dataset'))) {
-		return 'Dataset';
+		return 'Reports & datasets';
 	}
 	if (publicationTypes.some((value) => value.includes('conference'))) {
 		return 'Conference Papers';
@@ -814,6 +858,7 @@ const formatReferenceAPA = (args: {
 	sourceType: SourceType;
 	containerTitle: string;
 	volume: string;
+	issue: string;
 	pages: string;
 	link: string;
 }): string => {
@@ -853,12 +898,25 @@ const formatReferenceAPA = (args: {
 			.trim();
 	}
 
-	if (args.sourceType === 'Dataset') {
-		const repoPart = containerItalic ? ` ${containerItalic}.` : '';
-		return `${lead} ${safeTitle} [Data set].${repoPart}${link}`.trim();
+	if (isReportOrDatasetSourceType(args.sourceType)) {
+		const label = getReportDatasetLabel(args.title, args.containerTitle, args.link);
+		const medium = label === 'Data set' ? '[Data set]' : '[Report]';
+		const publisherPart = safeContainer ? ` ${safeContainer}.` : '';
+
+		if (authorText) {
+			return `${authorText} (${args.year}). ${italicizeMarkdown(safeTitle)} ${medium}.${publisherPart}${link}`
+				.replace(/\s+/g, ' ')
+				.trim();
+		}
+
+		return `${italicizeMarkdown(safeTitle)} (${args.year}). ${medium}.${publisherPart}${link}`
+			.replace(/\s+/g, ' ')
+			.trim();
 	}
 
-	const volumePages = [args.volume, args.pages].filter(Boolean).join(', ');
+	const volumeWithIssue =
+		args.volume && args.issue ? `${args.volume}(${args.issue})` : args.volume || '';
+	const volumePages = [volumeWithIssue, args.pages].filter(Boolean).join(', ');
 	const journalPart = containerItalic ? ` ${containerItalic}` : '';
 	const volumePart = volumePages ? `, ${volumePages}` : '';
 	return `${lead} ${safeTitle}.${journalPart}${volumePart}.${link}`.trim();
@@ -871,6 +929,7 @@ const formatReferenceMLA = (args: {
 	sourceType: SourceType;
 	containerTitle: string;
 	volume: string;
+	issue: string;
 	pages: string;
 	link: string;
 }): string => {
@@ -908,9 +967,20 @@ const formatReferenceMLA = (args: {
 			.trim();
 	}
 
+	if (isReportOrDatasetSourceType(args.sourceType)) {
+		const label = getReportDatasetLabel(args.title, args.containerTitle, args.link);
+		const medium = label === 'Data set' ? 'Data set' : 'Report';
+		const publisherPart = container ? `${container}, ` : '';
+		const linkPart = args.link ? `, ${args.link}` : '';
+		return `${lead}${italicizeMarkdown(stripTrailingPeriod(args.title))}. ${medium}, ${publisherPart}${args.year}${linkPart}.`
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
 	const detailBits = [
 		containerItalic,
 		args.volume ? `vol. ${args.volume}` : '',
+		args.issue ? `no. ${args.issue}` : '',
 		args.pages ? `pp. ${args.pages}` : '',
 		args.year,
 		args.link
@@ -926,6 +996,7 @@ const formatReferenceChicago = (args: {
 	sourceType: SourceType;
 	containerTitle: string;
 	volume: string;
+	issue: string;
 	pages: string;
 	link: string;
 }): string => {
@@ -963,11 +1034,22 @@ const formatReferenceChicago = (args: {
 			.trim();
 	}
 
+	if (isReportOrDatasetSourceType(args.sourceType)) {
+		const label = getReportDatasetLabel(args.title, args.containerTitle, args.link);
+		const medium = label === 'Data set' ? 'Data set' : 'Report';
+		const publisher = container ? `${container}, ` : '';
+		const link = args.link ? ` ${args.link}.` : '';
+		return `${lead}${italicizeMarkdown(stripTrailingPeriod(args.title))}. ${medium}. ${publisher}${args.year}.${link}`
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
 	const journal = containerItalic ? ` ${containerItalic}` : '';
 	const volume = args.volume ? ` ${args.volume}` : '';
+	const issue = args.issue ? `, no. ${args.issue}` : '';
 	const pages = args.pages ? `: ${args.pages}` : '';
 	const link = args.link ? ` ${args.link}.` : '';
-	return `${lead}${title}${journal}${volume} (${args.year})${pages}.${link}`
+	return `${lead}${title}${journal}${volume}${issue} (${args.year})${pages}.${link}`
 		.replace(/\s+/g, ' ')
 		.trim();
 };
@@ -979,6 +1061,7 @@ const formatReferenceIEEE = (args: {
 	sourceType: SourceType;
 	containerTitle: string;
 	volume: string;
+	issue: string;
 	pages: string;
 	link: string;
 	doi: string;
@@ -1007,10 +1090,18 @@ const formatReferenceIEEE = (args: {
 		return `[1] ${authorText}, ${italicizeMarkdown(stripTrailingPeriod(args.title))}, Thesis${institution}, ${args.year}${doiPart}${linkPart}.`;
 	}
 
+	if (isReportOrDatasetSourceType(args.sourceType)) {
+		const label = getReportDatasetLabel(args.title, args.containerTitle, args.link);
+		const medium = label === 'Data set' ? 'Data set' : 'Report';
+		const publisher = container ? `${container}, ` : '';
+		return `[1] ${authorText}, ${italicizeMarkdown(stripTrailingPeriod(args.title))}, ${medium}, ${publisher}${args.year}${doiPart}${linkPart}.`;
+	}
+
 	const volume = args.volume ? `, vol. ${args.volume}` : '';
+	const issue = args.issue ? `, no. ${args.issue}` : '';
 	const pages = args.pages ? `, pp. ${args.pages}` : '';
 	const journal = containerItalic ? `, ${containerItalic}` : '';
-	return `[1] ${authorText}, ${title}${journal}${volume}${pages}, ${args.year}${doiPart}${linkPart}.`;
+	return `[1] ${authorText}, ${title}${journal}${volume}${issue}${pages}, ${args.year}${doiPart}${linkPart}.`;
 };
 
 const formatReferenceRmitHarvard = (args: {
@@ -1020,6 +1111,7 @@ const formatReferenceRmitHarvard = (args: {
 	sourceType: SourceType;
 	containerTitle: string;
 	volume: string;
+	issue: string;
 	pages: string;
 	link: string;
 	doi: string;
@@ -1030,7 +1122,7 @@ const formatReferenceRmitHarvard = (args: {
 	const lead = isJournalSource
 		? authorText
 			? `${authorText} (${args.year})`
-			: `(${args.year})`
+			: `${stripTrailingPeriod(args.containerTitle) || 'Unknown journal'} (${args.year})`
 		: authorText
 			? `${authorText} ${args.year},`
 			: `${args.year},`;
@@ -1047,8 +1139,14 @@ const formatReferenceRmitHarvard = (args: {
 	const journalLinkPart = !args.doi && viewedLink ? `, <${viewedLink}>` : '';
 
 	if (isJournalSource) {
+		const journalLocator = buildVolumeIssuePages({
+			volume: args.volume,
+			issue: args.issue,
+			pages: args.pages
+		});
 		const sourcePart = containerItalic ? `, ${containerItalic}` : '';
-		return `${lead} ${title}${sourcePart}${doiPart || journalLinkPart}.`
+		const locatorPart = journalLocator ? `, ${journalLocator}` : '';
+		return `${lead} ${title}${sourcePart}${locatorPart}${doiPart || journalLinkPart}.`
 			.replace(/\s+/g, ' ')
 			.trim();
 	}
@@ -1061,6 +1159,26 @@ const formatReferenceRmitHarvard = (args: {
 	if (args.sourceType === 'Books') {
 		const publisher = containerItalic ? `, ${containerItalic}` : '';
 		return `${lead} ${bookTitle}${publisher}${viewed}${doiPart}.`
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
+	if (isReportOrDatasetSourceType(args.sourceType)) {
+		const reportLead = authorText
+			? `${authorText} (${args.year})`
+			: `${stripTrailingPeriod(container) || 'Unknown source'} (${args.year})`;
+		const reportTitle = stripTrailingPeriod(toRmitSentenceCase(args.title));
+		const label = getReportDatasetLabel(args.title, args.containerTitle, args.link);
+		const mediumSuffix = label === 'Data set' ? ', data set' : '';
+		const repositoryBase = stripTrailingPeriod(container);
+		const repositoryLabel = repositoryBase
+			? /\b(website|repository|portal|database|catalog(?:ue)?)\b/i.test(repositoryBase)
+				? repositoryBase
+				: `${repositoryBase} website`
+			: '';
+		const accessedPart = viewedLink ? `, accessed ${args.accessedDate}` : '';
+		const linkPart = viewedLink ? `. ${viewedLink}` : '.';
+		return `${reportLead} ${reportTitle}${mediumSuffix}${repositoryLabel ? `, ${repositoryLabel}` : ''}${accessedPart}${doiPart}${linkPart}`
 			.replace(/\s+/g, ' ')
 			.trim();
 	}
@@ -1087,6 +1205,7 @@ const formatCitationByStyle = (args: {
 	title: string;
 	containerTitle: string;
 	volume: string;
+	issue: string;
 	pages: string;
 	link: string;
 	doi: string;
@@ -1150,6 +1269,7 @@ const buildSemanticCitation = (args: {
 		toTrimmedString(args.paper.journal?.name || args.paper.venue || args.context.metadata.containerTitle)
 	);
 	const volume = compactWhitespace(toTrimmedString(args.paper.journal?.volume || args.context.metadata.volume));
+	const issue = compactWhitespace(toTrimmedString(args.paper.journal?.issue || args.context.metadata.issue));
 	const pages = compactWhitespace(toTrimmedString(args.paper.journal?.pages || args.context.metadata.pages));
 
 	const formatted = formatCitationByStyle({
@@ -1160,6 +1280,7 @@ const buildSemanticCitation = (args: {
 		title,
 		containerTitle,
 		volume,
+		issue,
 		pages,
 		link,
 		doi
@@ -1234,33 +1355,6 @@ const resolveSemanticCitation = async (
 		style
 	});
 };
-
-const mapWithConcurrency = async <T, TResult>(
-	items: T[],
-	concurrency: number,
-	mapper: (item: T, index: number) => Promise<TResult>
-): Promise<TResult[]> => {
-	if (items.length === 0) {
-		return [];
-	}
-
-	const safeConcurrency = Math.max(1, Math.min(concurrency, items.length));
-	const results = new Array<TResult>(items.length);
-	let cursor = 0;
-
-	await Promise.all(
-		Array.from({ length: safeConcurrency }, async () => {
-			while (cursor < items.length) {
-				const index = cursor;
-				cursor += 1;
-				results[index] = await mapper(items[index], index);
-			}
-		})
-	);
-
-	return results;
-};
-
 export const resolveCitationsWithSemanticScholar = async (args: {
 	style: string;
 	sourceContexts: CitationSourceContext[];

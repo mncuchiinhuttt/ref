@@ -10,7 +10,12 @@ import {
 	projectMember,
 	user as authUser
 } from '$lib/server/db/schema';
-import { CITATION_STYLES, generateCitationsWithAI } from '$lib/server/citations/generate-citations';
+import {
+	CITATION_STYLES,
+	generateCitationsWithAI,
+	type GeneratedCitation
+} from '$lib/server/citations/generate-citations';
+import { convertCitationsToTargetStyle } from '$lib/server/citations/convert-citations';
 import { normalizeSourceTypeLabel } from '$lib/server/citations/source-metadata';
 import {
 	createExpansionRequest,
@@ -52,6 +57,76 @@ const quotaContextFromUser = (user: {
 	isFromRmit: user.isFromRmit ?? false,
 	email: user.email ?? ''
 });
+
+const compactWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+const truncateForAudit = (value: string, maxLength = 220): string => {
+	const normalized = compactWhitespace(value);
+	if (!normalized) {
+		return '';
+	}
+
+	if (normalized.length <= maxLength) {
+		return normalized;
+	}
+
+	return `${normalized.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+};
+
+type CitationAiAuditItem = {
+	citationId: number | null;
+	sourceName: string;
+	sourceType: string;
+	sourceText: string;
+	method: string;
+	reason: string;
+};
+
+const buildOpenAiAnnotationNote = (citationItem: GeneratedCitation): string => {
+	if (!citationItem.aiAnnotation.requiresOpenAi) {
+		return '';
+	}
+
+	return `[AI annotation] requires_openai=true; method=${citationItem.aiAnnotation.method}; reason=${citationItem.aiAnnotation.reason}`;
+};
+
+const buildCitationGenerationMetadata = (args: {
+	style: string;
+	mode: 'generate' | 'convert' | 'regenerate-all' | 'regenerate-one';
+	fromStyle?: string | null;
+	citationId?: number | null;
+	generatedCitations: GeneratedCitation[];
+	citationIdsByIndex?: Array<number | null | undefined>;
+}): string => {
+	const aiItems: CitationAiAuditItem[] = args.generatedCitations
+		.map((item, index) => ({ item, index }))
+		.filter(({ item }) => item.aiAnnotation.requiresOpenAi)
+		.map(({ item, index }) => ({
+			citationId:
+				typeof args.citationIdsByIndex?.[index] === 'number'
+					? (args.citationIdsByIndex?.[index] ?? null)
+					: args.citationId ?? null,
+			sourceName: truncateForAudit(item.sourceName, 180),
+			sourceType: item.sourceType,
+			sourceText: truncateForAudit(item.sourceText, 260),
+			method: item.aiAnnotation.method,
+			reason: truncateForAudit(item.aiAnnotation.reason, 220)
+		}));
+
+	const payload = {
+		style: args.style,
+		mode: args.mode,
+		fromStyle: args.fromStyle ?? null,
+		citationId: args.citationId ?? null,
+		ai: {
+			requiredCount: aiItems.length,
+			totalCount: args.generatedCitations.length,
+			items: aiItems
+		}
+	};
+
+	return JSON.stringify(payload);
+};
 
 const getProjectAccess = async (projectId: number, userId: string) => {
 	const [projectRow] = await db
@@ -478,9 +553,14 @@ export const actions: Actions = {
 					inTextCitation: generatedCitation.inTextCitation,
 					referenceCitation: generatedCitation.referenceCitation,
 					style,
-					note:
-						generatedCitation.plainExplanation ||
-						(generatedCitation.warnings.length > 0 ? generatedCitation.warnings[0] : null),
+					note: (() => {
+						const baseNote =
+							generatedCitation.plainExplanation ||
+							(generatedCitation.warnings.length > 0 ? generatedCitation.warnings[0] : null);
+						const aiNote = buildOpenAiAnnotationNote(generatedCitation);
+						const mergedNote = [baseNote ?? '', aiNote].filter(Boolean).join(' ').trim();
+						return mergedNote || null;
+					})(),
 					updatedAt
 				})
 				.where(and(eq(citation.id, currentCitation.id), eq(citation.projectId, projectId)))
@@ -514,7 +594,12 @@ export const actions: Actions = {
 			projectId,
 			generatedCount: regeneratedCitations.length,
 			actionType: 'regenerate-citations',
-			metadata: `style=${style}`
+			metadata: buildCitationGenerationMetadata({
+				style,
+				mode: 'regenerate-all',
+				generatedCitations: regenerated,
+				citationIdsByIndex: existingCitations.map((item) => item.id)
+			})
 		});
 
 		const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
@@ -625,7 +710,17 @@ export const actions: Actions = {
 			return fail(403, { message: 'Project access denied.' });
 		}
 
-		const citationLinesRaw = toValue((await event.request.formData()).get('citationLines'));
+		const formData = await event.request.formData();
+		const citationLinesRaw = toValue(formData.get('citationLines'));
+		const citationInputModeRaw = toValue(formData.get('citationInputMode'));
+		const citationInputMode =
+			citationInputModeRaw === 'convert-existing-style'
+				? 'convert-existing-style'
+				: 'generate-from-source';
+		const sourceCitationStyleRaw = toValue(formData.get('sourceCitationStyle'));
+		const sourceCitationStyle = isCitationStyle(sourceCitationStyleRaw)
+			? sourceCitationStyleRaw
+			: null;
 		const sourceLines = citationLinesRaw
 			.split(/\r?\n/)
 			.map((item) => item.trim())
@@ -647,6 +742,14 @@ export const actions: Actions = {
 			});
 		}
 
+		if (citationInputMode === 'convert-existing-style' && !sourceCitationStyle) {
+			return fail(400, {
+				activeForm: 'citations',
+				citationLines: citationLinesRaw,
+				message: 'Choose the source citation style before converting.'
+			});
+		}
+
 		const generationAllowance = await ensureCanGenerateCitations({
 			...quotaContextFromUser(event.locals.user),
 			requestedCount: sourceLines.length
@@ -664,20 +767,30 @@ export const actions: Actions = {
 		let generated;
 		const semanticScholarRetries: Array<{ attempt: number; reason: string }> = [];
 		try {
-			generated = await generateCitationsWithAI({
-				style: access.project.citationStyle,
-				sourceLines,
-				onSemanticScholarRetry: (retryEvent) => {
-					semanticScholarRetries.push({
-						attempt: retryEvent.attempt,
-						reason: retryEvent.reason
-					});
-				}
-			});
+			if (citationInputMode === 'convert-existing-style' && sourceCitationStyle) {
+				generated = await convertCitationsToTargetStyle({
+					sourceStyle: sourceCitationStyle,
+					targetStyle: access.project.citationStyle,
+					citationLines: sourceLines
+				});
+			} else {
+				generated = await generateCitationsWithAI({
+					style: access.project.citationStyle,
+					sourceLines,
+					onSemanticScholarRetry: (retryEvent) => {
+						semanticScholarRetries.push({
+							attempt: retryEvent.attempt,
+							reason: retryEvent.reason
+						});
+					}
+				});
+			}
 		} catch (error) {
 			console.error('[project/addCitations] Citation generation failed', {
 				projectId,
 				sourceCount: sourceLines.length,
+				mode: citationInputMode,
+				sourceCitationStyle,
 				error
 			});
 
@@ -691,22 +804,33 @@ export const actions: Actions = {
 			});
 		}
 
+		const convertedFromStyleTag =
+			citationInputMode === 'convert-existing-style' && sourceCitationStyle
+				? `Converted style from ${sourceCitationStyle}`
+				: null;
+
 		const insertedRows = await db
 			.insert(citation)
 			.values(
-			generated.map((item) => ({
-				projectId,
-				title: item.sourceName,
-				rawText: item.sourceText,
-				sourceType: item.sourceType,
-				inTextCitation: item.inTextCitation,
-				referenceCitation: item.referenceCitation,
-				style: access.project.citationStyle,
-				note:
-					item.plainExplanation ||
-					(item.warnings.length > 0 ? item.warnings[0] : null),
-				updatedAt: new Date()
-			}))
+			generated.map((item) => {
+				const baseNote = convertedFromStyleTag
+					? `${convertedFromStyleTag} to ${access.project.citationStyle}. ${item.plainExplanation || ''}`.trim()
+					: item.plainExplanation || (item.warnings.length > 0 ? item.warnings[0] : null);
+				const aiNote = buildOpenAiAnnotationNote(item);
+				const mergedNote = [baseNote ?? '', aiNote].filter(Boolean).join(' ').trim();
+
+				return {
+					projectId,
+					title: item.sourceName,
+					rawText: convertedFromStyleTag ? `${convertedFromStyleTag}: ${item.sourceText}` : item.sourceText,
+					sourceType: item.sourceType,
+					inTextCitation: item.inTextCitation,
+					referenceCitation: item.referenceCitation,
+					style: access.project.citationStyle,
+					note: mergedNote || null,
+					updatedAt: new Date()
+				};
+			})
 		)
 			.returning({
 				id: citation.id,
@@ -725,16 +849,27 @@ export const actions: Actions = {
 			projectId,
 			generatedCount: insertedRows.length,
 			actionType: 'add-citations',
-			metadata: `style=${access.project.citationStyle}`
+			metadata: buildCitationGenerationMetadata({
+				style: access.project.citationStyle,
+				mode: citationInputMode === 'convert-existing-style' ? 'convert' : 'generate',
+				fromStyle: sourceCitationStyle,
+				generatedCitations: generated,
+				citationIdsByIndex: insertedRows.map((item) => item.id)
+			})
 		});
 
 		const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));
 
 		return {
 			activeForm: 'citations',
-			message: `Generated ${insertedRows.length} citation${insertedRows.length === 1 ? '' : 's'}.`,
+			message:
+				citationInputMode === 'convert-existing-style' && sourceCitationStyle
+					? `Converted ${insertedRows.length} citation${insertedRows.length === 1 ? '' : 's'} from ${sourceCitationStyle} to ${access.project.citationStyle}.`
+					: `Generated ${insertedRows.length} citation${insertedRows.length === 1 ? '' : 's'}.`,
 			generatedCount: insertedRows.length,
 			semanticScholarRetryCount: semanticScholarRetries.length,
+			citationInputMode,
+			sourceCitationStyle,
 			citationQuota,
 			generatedCitations: insertedRows.map((item) => ({
 				id: item.id,
@@ -964,9 +1099,14 @@ export const actions: Actions = {
 				inTextCitation: regeneratedCitation.inTextCitation,
 				referenceCitation: regeneratedCitation.referenceCitation,
 				style: access.project.citationStyle,
-				note:
-					regeneratedCitation.plainExplanation ||
-					(regeneratedCitation.warnings.length > 0 ? regeneratedCitation.warnings[0] : null),
+				note: (() => {
+					const baseNote =
+						regeneratedCitation.plainExplanation ||
+						(regeneratedCitation.warnings.length > 0 ? regeneratedCitation.warnings[0] : null);
+					const aiNote = buildOpenAiAnnotationNote(regeneratedCitation);
+					const mergedNote = [baseNote ?? '', aiNote].filter(Boolean).join(' ').trim();
+					return mergedNote || null;
+				})(),
 				updatedAt: new Date()
 			})
 			.where(and(eq(citation.id, citationId), eq(citation.projectId, projectId)))
@@ -991,7 +1131,13 @@ export const actions: Actions = {
 			projectId,
 			generatedCount: 1,
 			actionType: 'regenerate-citations',
-			metadata: `citationId=${citationId};style=${access.project.citationStyle}`
+			metadata: buildCitationGenerationMetadata({
+				style: access.project.citationStyle,
+				mode: 'regenerate-one',
+				citationId,
+				generatedCitations: [regeneratedCitation],
+				citationIdsByIndex: [citationId]
+			})
 		});
 
 		const citationQuota = await getCitationQuotaState(quotaContextFromUser(event.locals.user));

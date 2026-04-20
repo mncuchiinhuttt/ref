@@ -48,6 +48,10 @@
 	let { data }: { data: PageData } = $props();
 
 	const getInitialStyleValue = (): string => data.project.citationStyle;
+	const getInitialSourceCitationStyle = (): string =>
+		data.citationStyles.find((style) => style === 'APA') ??
+			data.citationStyles[0] ??
+			data.project.citationStyle;
 	const getInitialCitations = (): CitationRow[] =>
 		data.citations.map((item) => ({
 			...item,
@@ -56,9 +60,8 @@
 	const sourceTypeOptions = [
 		'Websites & Webpage',
 		'Newspaper & Magazine Articles',
+		'Reports & datasets',
 		'Journal Articles',
-		'Government Report',
-		'Organization Report',
 		'Conference Papers',
 		'Blog/Blog Post',
 		'Social Media Post',
@@ -67,9 +70,28 @@
 		'Standards & Patents',
 		'Film, Movie, or TV',
 		'Podcast',
-		'YouTube',
-		'Dataset'
+		'YouTube'
 	] as const;
+
+	const normalizeSourceTypeForUi = (value: string): string => {
+		const normalized = value.trim().toLowerCase();
+		if (!normalized) {
+			return sourceTypeOptions[0];
+		}
+
+		if (
+			normalized === 'government report' ||
+			normalized === 'organization report' ||
+			normalized === 'organisation report' ||
+			normalized === 'dataset' ||
+			normalized === 'data set'
+		) {
+			return 'Reports & datasets';
+		}
+
+		const match = sourceTypeOptions.find((option) => option.toLowerCase() === normalized);
+		return match ?? sourceTypeOptions[0];
+	};
 
 	let isRenameDialogOpen = $state(false);
 	let isShareOpen = $state(false);
@@ -77,6 +99,10 @@
 	let isReferencePreviewOpen = $state(false);
 	let isDeleteConfirmOpen = $state(false);
 	let citationLinesInput = $state('');
+	let citationInputMode = $state<'generate-from-source' | 'convert-existing-style'>(
+		'generate-from-source'
+	);
+	let sourceCitationStyle = $state(getInitialSourceCitationStyle());
 	let styleValue = $state(getInitialStyleValue());
 	let styleUpdateMode = $state<'style-only' | 'regenerate-all'>('style-only');
 	let citations = $state<CitationRow[]>(getInitialCitations());
@@ -356,7 +382,7 @@
 		const sourceName = typeof record.sourceName === 'string' ? record.sourceName.trim() : rawText;
 		const sourceType =
 			typeof record.sourceType === 'string' && record.sourceType.trim()
-				? record.sourceType.trim()
+				? normalizeSourceTypeForUi(record.sourceType)
 				: 'Websites & Webpage';
 		const inTextCitation =
 			typeof record.inTextCitation === 'string' ? record.inTextCitation.trim() : '';
@@ -459,7 +485,7 @@
 	const openCitationEditor = (item: CitationRow): void => {
 		editingCitationId = item.id;
 		editSourceName = item.sourceName;
-		editSourceType = item.sourceType || sourceTypeOptions[0];
+		editSourceType = normalizeSourceTypeForUi(item.sourceType || sourceTypeOptions[0]);
 		editInTextCitation = item.inTextCitation;
 		editReferenceCitation = item.referenceCitation;
 		editNote = item.note ?? '';
@@ -1511,7 +1537,13 @@
 						<div class="mb-4 flex items-center justify-between gap-3">
 							<div>
 								<p class="font-heading text-lg font-semibold tracking-tight">Add citations</p>
-								<p class="text-sm text-muted-foreground">Paste one source per line and generate.</p>
+								<p class="text-sm text-muted-foreground">
+									{#if citationInputMode === 'convert-existing-style'}
+										Paste one citation per line and convert to current project style ({styleValue}).
+									{:else}
+										Paste one source per line and generate citations in {styleValue} style.
+									{/if}
+								</p>
 							</div>
 							<Button type="button" variant="ghost" size="sm" onclick={closeCitationDialog}>Close</Button>
 						</div>
@@ -1521,24 +1553,40 @@
 							method="post"
 							action="?/addCitations"
 							use:enhance={({ formData, cancel }) => {
+								const inputMode = String(formData.get('citationInputMode') ?? 'generate-from-source');
+								const isConvertMode = inputMode === 'convert-existing-style';
+								const sourceStyle = String(formData.get('sourceCitationStyle') ?? '').trim();
 								const citationLinesRaw = String(formData.get('citationLines') ?? '');
 								const sourceLines = citationLinesRaw
 									.split(/\r?\n/)
 									.map((item) => item.trim())
 									.filter(Boolean);
 
+								if (isConvertMode && !sourceStyle) {
+									cancel();
+									toast.error('Choose the source citation style before converting.');
+									return;
+								}
+
 								if (sourceLines.length === 0) {
 									cancel();
-									toast.error('Paste at least one citation source line.');
+									toast.error(
+										isConvertMode
+											? 'Paste at least one citation to convert.'
+											: 'Paste at least one citation source line.'
+									);
 									return;
 								}
 
 								const createdAt = new Date().toISOString();
 								const pendingRows: CitationRow[] = sourceLines.map((line, index): CitationRow => ({
 									id: `pending-${Date.now()}-${index}`,
-									rawText: line,
+									rawText:
+										isConvertMode && sourceStyle
+											? `Converted style from ${sourceStyle}: ${line}`
+											: line,
 									sourceName: line,
-									sourceType: 'processing',
+									sourceType: isConvertMode ? 'converting' : 'processing',
 									inTextCitation: '',
 									referenceCitation: '',
 									style: styleValue,
@@ -1550,7 +1598,9 @@
 
 								citations = [...pendingRows, ...citations];
 								const announceId = toast.loading(
-									`Generating ${sourceLines.length} citation${sourceLines.length === 1 ? '' : 's'}...`
+									isConvertMode
+										? `Converting ${sourceLines.length} citation${sourceLines.length === 1 ? '' : 's'} from ${sourceStyle} to ${styleValue}...`
+										: `Generating ${sourceLines.length} citation${sourceLines.length === 1 ? '' : 's'}...`
 								);
 
 								return async ({ result }) => {
@@ -1599,12 +1649,67 @@
 								};
 							}}
 						>
-							<Label for="citation-lines">Paste citation source lines</Label>
+							<div
+								class={`grid gap-2 ${
+									citationInputMode === 'convert-existing-style' ? 'md:grid-cols-2' : 'md:grid-cols-1'
+								}`}
+							>
+								<div class="grid gap-1.5">
+									<Label for="citation-input-mode">Input mode</Label>
+									<Select.Root type="single" bind:value={citationInputMode}>
+										<Select.Trigger id="citation-input-mode" class="w-full">
+											{citationInputMode === 'convert-existing-style'
+												? 'Convert citation style'
+												: 'Generate from source lines'}
+										</Select.Trigger>
+										<Select.Content>
+											<Select.Item
+												value="generate-from-source"
+												label="Generate from source lines"
+											/>
+											<Select.Item
+												value="convert-existing-style"
+												label="Convert citation style"
+											/>
+										</Select.Content>
+									</Select.Root>
+									<input type="hidden" name="citationInputMode" value={citationInputMode} />
+								</div>
+
+								{#if citationInputMode === 'convert-existing-style'}
+									<div class="grid gap-1.5">
+										<Label for="source-citation-style">Source citation style</Label>
+										<Select.Root type="single" bind:value={sourceCitationStyle}>
+											<Select.Trigger id="source-citation-style" class="w-full">
+												{sourceCitationStyle}
+											</Select.Trigger>
+											<Select.Content>
+												{#each data.citationStyles as style (style)}
+													<Select.Item value={style} label={style} />
+												{/each}
+											</Select.Content>
+										</Select.Root>
+										<input type="hidden" name="sourceCitationStyle" value={sourceCitationStyle} />
+									</div>
+								{/if}
+							</div>
+
+							<Label for="citation-lines">
+								{#if citationInputMode === 'convert-existing-style'}
+									Paste citation lines to convert
+								{:else}
+									Paste citation source lines
+								{/if}
+							</Label>
 							<textarea
 								id="citation-lines"
 								name="citationLines"
 								rows="8"
-								placeholder="One source per line"
+								placeholder={
+									citationInputMode === 'convert-existing-style'
+										? 'One citation per line in the selected source style'
+										: 'One source per line'
+								}
 								class="border-input data-placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-3"
 								bind:value={citationLinesInput}
 							></textarea>

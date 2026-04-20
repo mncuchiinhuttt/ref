@@ -1,3 +1,14 @@
+import { env } from '$env/dynamic/private';
+import { mapWithConcurrency } from './async-utils';
+import { resolveBookFromUrl } from './bookResolver';
+import { detectSourceType } from './source-type-detection';
+import {
+	SOURCE_TYPE_VALUES,
+	isReportOrDatasetSourceType,
+	normalizeSourceTypeLabel,
+	type SourceType
+} from './source-types';
+
 const TRACKING_QUERY_PREFIXES = ['utm_', 'mc_', 'ga_'] as const;
 const TRACKING_QUERY_KEYS = new Set([
 	'fbclid',
@@ -17,6 +28,8 @@ const URL_PATTERN = /(https?:\/\/[^\s<>"'`]+)/i;
 const META_TAG_PATTERN = /<meta\b[^>]*>/gi;
 const LINK_TAG_PATTERN = /<link\b[^>]*>/gi;
 const TITLE_TAG_PATTERN = /<title[^>]*>([\s\S]*?)<\/title>/i;
+const HEADING_TAG_PATTERN = /<h([1-3])\b[^>]*>([\s\S]*?)<\/h\1>/gi;
+const STRIP_TAG_PATTERN = /<[^>]+>/g;
 const JSON_LD_SCRIPT_PATTERN = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
 const ATTRIBUTE_PATTERN = /([A-Za-z_:][\w:.-]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
 const DOI_PATTERN = /\b10\.\d{4,9}\/[A-Z0-9._;()/:+-]+\b/i;
@@ -25,25 +38,8 @@ const ISSN_PATTERN = /\b\d{4}-\d{3}[\dX]\b/i;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_HTML_BYTES = 1_800_000;
 
-export const SOURCE_TYPE_VALUES = [
-	'Websites & Webpage',
-	'Newspaper & Magazine Articles',
-	'Journal Articles',
-	'Government Report',
-	'Organization Report',
-	'Conference Papers',
-	'Blog/Blog Post',
-	'Social Media Post',
-	'Books',
-	'Theses & Dissertations',
-	'Standards & Patents',
-	'Film, Movie, or TV',
-	'Podcast',
-	'YouTube',
-	'Dataset'
-] as const;
-
-export type SourceType = (typeof SOURCE_TYPE_VALUES)[number];
+export { SOURCE_TYPE_VALUES, normalizeSourceTypeLabel };
+export type { SourceType };
 
 type JsonLdAuthor = {
 	name: string;
@@ -124,12 +120,6 @@ type FetchedDocument = {
 	status: number;
 };
 
-type SourceTypeDecision = {
-	sourceType: SourceType;
-	reasoningShort: string;
-	confidence: number;
-};
-
 export type ResearchGatePublicationInfo = {
 	isPublication: boolean;
 	candidateTitle: string;
@@ -139,91 +129,6 @@ export type ResearchGatePublicationInfo = {
 const toTrimmedString = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 
 const compactWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
-
-export const normalizeSourceTypeLabel = (value: string): SourceType => {
-	const normalized = compactWhitespace(value).toLowerCase();
-
-	if (!normalized) {
-		return 'Websites & Webpage';
-	}
-
-	const exact = SOURCE_TYPE_VALUES.find((item) => item.toLowerCase() === normalized);
-	if (exact) {
-		return exact;
-	}
-
-	if (normalized.includes('youtube')) {
-		return 'YouTube';
-	}
-
-	if (normalized.includes('podcast')) {
-		return 'Podcast';
-	}
-
-	if (normalized.includes('dataset') || normalized.includes('data set')) {
-		return 'Dataset';
-	}
-
-	if (normalized.includes('thesis') || normalized.includes('dissertation')) {
-		return 'Theses & Dissertations';
-	}
-
-	if (normalized.includes('standard') || normalized.includes('patent')) {
-		return 'Standards & Patents';
-	}
-
-	if (
-		normalized.includes('film') ||
-		normalized.includes('movie') ||
-		normalized.includes('tv') ||
-		normalized.includes('video')
-	) {
-		return 'Film, Movie, or TV';
-	}
-
-	if (normalized.includes('social')) {
-		return 'Social Media Post';
-	}
-
-	if (normalized.includes('book')) {
-		return 'Books';
-	}
-
-	if (normalized.includes('conference')) {
-		return 'Conference Papers';
-	}
-
-	if (normalized.includes('government') || normalized.includes('gov')) {
-		return 'Government Report';
-	}
-
-	if (
-		normalized.includes('organization') ||
-		normalized.includes('organisation') ||
-		normalized.includes('ngo') ||
-		normalized.includes('institutional')
-	) {
-		return 'Organization Report';
-	}
-
-	if (normalized.includes('journal') || normalized.includes('preprint') || normalized.includes('scholarly')) {
-		return 'Journal Articles';
-	}
-
-	if (
-		normalized.includes('newspaper') ||
-		normalized.includes('magazine') ||
-		normalized.includes('news')
-	) {
-		return 'Newspaper & Magazine Articles';
-	}
-
-	if (normalized.includes('blog')) {
-		return 'Blog/Blog Post';
-	}
-
-	return 'Websites & Webpage';
-};
 
 const decodeHtmlEntities = (value: string): string =>
 	value
@@ -683,6 +588,111 @@ const collectTitle = (html: string): string => {
 	return compactWhitespace(decodeHtmlEntities(match[1]));
 };
 
+const collectStrongestHeading = (html: string): string => {
+	const candidates: Array<{ text: string; score: number; index: number }> = [];
+	let index = 0;
+
+	for (const match of html.matchAll(HEADING_TAG_PATTERN)) {
+		const level = Number(match[1] ?? 3);
+		const rawHeading = match[2] ?? '';
+		const text = compactWhitespace(decodeHtmlEntities(rawHeading.replace(STRIP_TAG_PATTERN, ' ')));
+		if (!text) {
+			continue;
+		}
+
+		const wordCount = text.split(/\s+/).filter(Boolean).length;
+		if (wordCount < 2) {
+			continue;
+		}
+
+		const reportKeywordBoost =
+			/\b(report|market|industry|forecast|size|share|growth|opportunit(?:y|ies)|trend|dataset|statistics|white\s*paper|annual report)\b/i.test(
+				text
+			)
+				? 8
+				: 0;
+		const levelScore = Math.max(0, 4 - Math.min(3, level)) * 10;
+		const lengthScore = Math.min(14, wordCount);
+
+		candidates.push({
+			text,
+			score: levelScore + lengthScore + reportKeywordBoost,
+			index
+		});
+
+		index += 1;
+	}
+
+	if (candidates.length === 0) {
+		return '';
+	}
+
+	candidates.sort((left, right) => {
+		if (right.score !== left.score) {
+			return right.score - left.score;
+		}
+
+		return left.index - right.index;
+	});
+
+	return candidates[0].text;
+};
+
+const extractTitleFromUrlPath = (urlValue: string): string => {
+	try {
+		const parsed = new URL(urlValue);
+		const segments = parsed.pathname.split('/').filter(Boolean);
+		const candidate = segments.at(-1) ?? '';
+		if (!candidate) {
+			return '';
+		}
+
+		const decoded = decodeURIComponent(candidate.replace(/\.[a-z0-9]{2,6}$/i, ''));
+		return compactWhitespace(
+			decodeHtmlEntities(decoded)
+				.replace(/[\-_+]+/g, ' ')
+				.replace(/\b(pdf|html?|aspx?)\b/gi, ' ')
+		);
+	} catch {
+		return '';
+	}
+};
+
+const normalizeForTitleComparison = (value: string): string =>
+	compactWhitespace(decodeHtmlEntities(value))
+		.toLowerCase()
+		.replace(/[^a-z0-9\s]/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+
+const isWeakOrGenericTitle = (title: string, siteName: string): boolean => {
+	const normalizedTitle = normalizeForTitleComparison(title);
+	if (!normalizedTitle) {
+		return true;
+	}
+
+	const normalizedSiteName = normalizeForTitleComparison(siteName);
+	if (normalizedSiteName && normalizedTitle === normalizedSiteName) {
+		return true;
+	}
+
+	if (
+		/^(home|homepage|index|welcome|overview|research|reports?|market research|untitled|page not found|forbidden|error)$/.test(
+			normalizedTitle
+		)
+	) {
+		return true;
+	}
+
+	const wordCount = normalizedTitle.split(/\s+/).filter(Boolean).length;
+	const hasStrongKeyword =
+		/\b(report|dataset|statistics|analysis|forecast|market|industry|white paper|whitepaper|annual report)\b/.test(
+			normalizedTitle
+		);
+
+	return wordCount <= 2 && !hasStrongKeyword;
+};
+
 const createEmptyJsonLdExtraction = (): JsonLdExtraction => ({
 	types: new Set<string>(),
 	titles: [],
@@ -966,236 +976,6 @@ const getPathname = (urlValue: string): string => {
 	}
 };
 
-const hasNewsDomainSignal = (domain: string): boolean => {
-	return /(nytimes|bbc|cnn|reuters|theguardian|washingtonpost|forbes|bloomberg|aljazeera|apnews|nbcnews|abcnews|usatoday|wsj|latimes|nypost|nydailynews|chicagotribune|bostonglobe|inquirer|seattletimes|startribune|newsday|denverpost|houstonchronicle|tampabay|dallasnews|ocregister|post-gazette|sfchronicle|ajc|miamiherald|freep|azcentral|stltoday|kansascity|charlotteobserver|cleveland|oregonlive|sacbee|baltimoresun|courant|reviewjournal|jsonline|vnexpress|vietnamnet|vietnamnews|vietnamplus|dantri|baomoi|vietbao|tienphong|baodautu|dautu|sggp|nhandan|tuoitre|thanhnien|laodong|hanoimoi|vneconomy|bongda|qdnd|nld|anninhthudo|plo|cand|suckhoedoisong|giadinhxahoi|phunuonline|danviet|nongnghiep|baogiaothong|nguoiduatin|baochinhphu|znews|vov|vietnambiz|cafef)/.test(
-		domain
-	);
-};
-
-const hasAcademicDomainSignal = (domain: string): boolean => {
-	return /arxiv\.org|ssrn\.com|biorxiv\.org|medrxiv\.org|acm\.org|ieeexplore\.ieee\.org|sciencedirect\.com|nature\.com|springer\.com|link\.springer\.com|wiley\.com|tandfonline\.com|jstor\.org|openreview\.net|semanticscholar\.org|plos\.org|frontiersin\.org/.test(
-		domain
-	);
-};
-
-const hasSocialDomainSignal = (domain: string): boolean => {
-	return /(x\.com|twitter\.com|facebook\.com|instagram\.com|linkedin\.com|reddit\.com|tiktok\.com|threads\.net)/.test(
-		domain
-	);
-};
-
-const hasYoutubeDomainSignal = (domain: string): boolean => {
-	return /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(domain);
-};
-
-const hasStandardsOrPatentDomainSignal = (domain: string): boolean => {
-	return /(wipo|uspto|espacenet|patents\.google|iso\.org|iec\.ch|ansi\.org|astm\.org|standards?)/.test(
-		domain
-	);
-};
-
-const hasGovDomain = (domain: string): boolean => {
-	return /(^|\.)gov(\.|$)/.test(domain);
-};
-
-const hasOrgDomain = (domain: string): boolean => {
-	return /\.org$/.test(domain);
-};
-
-const hasEduDomain = (domain: string): boolean => {
-	return /\.edu$/.test(domain);
-};
-
-const detectSourceType = (args: {
-	domain: string;
-	pathname: string;
-	contentType: string;
-	jsonLdTypes: Set<string>;
-	researchGatePublication: boolean;
-	doi: string;
-	isbn: string;
-	containerTitle: string;
-	publicationDate: string;
-	title: string;
-	authors: NormalizedSourceAuthor[];
-	siteName: string;
-}): SourceTypeDecision => {
-	const types = args.jsonLdTypes;
-	const lowerTitle = args.title.toLowerCase();
-	const lowerPath = args.pathname;
-	const lowerContainer = args.containerTitle.toLowerCase();
-	const lowerCombined = `${lowerTitle} ${lowerContainer} ${lowerPath} ${Array.from(types).join(' ')}`;
-	const isPdf = args.contentType.includes('application/pdf') || lowerPath.endsWith('.pdf');
-	const hasType = (needle: string): boolean => Array.from(types).some((type) => type.includes(needle));
-	const hasScholarlyTypeSignal = hasType('scholarlyarticle') || hasType('medicalscholarlyarticle');
-	const hasNewsTypeSignal = hasType('newsarticle');
-	const hasJournalContainerSignal = /\b(journal|transactions|preprint|arxiv|ssrn|biorxiv|medrxiv)\b/.test(
-		lowerContainer
-	);
-	const hasAcademicPathSignal =
-		/\/doi\//.test(lowerPath) ||
-		/\/abs\/\d{4}\.\d{4,5}(?:v\d+)?/.test(lowerPath) ||
-		/\/article\//.test(lowerPath);
-	const hasAcademicDomain = hasAcademicDomainSignal(args.domain);
-
-	if (hasType('dataset') || /dataset/.test(lowerCombined)) {
-		return { sourceType: 'Dataset', reasoningShort: 'Dataset metadata signal was detected.', confidence: 0.91 };
-	}
-
-	if (hasType('thesis') || hasType('dissertation') || /thesis|dissertation/.test(lowerCombined)) {
-		return {
-			sourceType: 'Theses & Dissertations',
-			reasoningShort: 'Thesis or dissertation cues were detected.',
-			confidence: 0.9
-		};
-	}
-
-	if (hasYoutubeDomainSignal(args.domain)) {
-		return {
-			sourceType: 'YouTube',
-			reasoningShort: 'YouTube domain identified from source URL.',
-			confidence: 0.95
-		};
-	}
-
-	if (hasType('podcastepisode') || hasType('audioobject') || /podcast/.test(lowerCombined)) {
-		return {
-			sourceType: 'Podcast',
-			reasoningShort: 'Podcast-specific metadata markers are present.',
-			confidence: 0.89
-		};
-	}
-
-	if (hasSocialDomainSignal(args.domain) || hasType('socialmediaposting') || /social/.test(lowerCombined)) {
-		return {
-			sourceType: 'Social Media Post',
-			reasoningShort: 'Social platform domain or schema signal found.',
-			confidence: 0.9
-		};
-	}
-
-	if (
-		hasStandardsOrPatentDomainSignal(args.domain) ||
-		hasType('patent') ||
-		hasType('legislation') ||
-		/standard|patent|iso\b|iec\b|ansi\b|astm\b/.test(lowerCombined)
-	) {
-		return {
-			sourceType: 'Standards & Patents',
-			reasoningShort: 'Standards or patent indicators were detected.',
-			confidence: 0.9
-		};
-	}
-
-	if (
-		hasType('videoobject') ||
-		hasType('movie') ||
-		hasType('tvseries') ||
-		/film|movie|tv\b|series|video/.test(lowerCombined)
-	) {
-		return {
-			sourceType: 'Film, Movie, or TV',
-			reasoningShort: 'Video or film-related metadata appears on page.',
-			confidence: 0.82
-		};
-	}
-
-	if (/conference|proceedings|symposium|workshop/.test(lowerCombined)) {
-		return {
-			sourceType: 'Conference Papers',
-			reasoningShort: 'Conference proceedings markers were identified.',
-			confidence: 0.9
-		};
-	}
-
-	if (
-		hasScholarlyTypeSignal ||
-		(args.doi && (hasScholarlyTypeSignal || !!args.containerTitle || hasAcademicDomain || hasAcademicPathSignal)) ||
-		(hasAcademicDomain && (args.doi || hasJournalContainerSignal || hasAcademicPathSignal)) ||
-		(hasJournalContainerSignal && (args.doi || args.authors.length > 0 || !!args.publicationDate))
-	) {
-		return {
-			sourceType: 'Journal Articles',
-			reasoningShort: 'Scholarly metadata indicators suggest an academic journal article.',
-			confidence: 0.92
-		};
-	}
-
-	if (/(arxiv\.org|ssrn\.com|biorxiv\.org|medrxiv\.org)/.test(args.domain)) {
-		return {
-			sourceType: 'Journal Articles',
-			reasoningShort: 'Preprint repository mapped to scholarly article type.',
-			confidence: 0.88
-		};
-	}
-
-	if (args.researchGatePublication) {
-		return {
-			sourceType: 'Journal Articles',
-			reasoningShort:
-				'ResearchGate publication URL detected; classified as scholarlyCandidate pending Semantic Scholar match.',
-			confidence: 0.76
-		};
-	}
-
-	if (args.isbn || hasType('book')) {
-		return { sourceType: 'Books', reasoningShort: 'ISBN or Book schema was detected.', confidence: 0.92 };
-	}
-
-	if (hasGovDomain(args.domain)) {
-		return {
-			sourceType: 'Government Report',
-			reasoningShort: 'Government domain matched report/document source.',
-			confidence: isPdf || /report|publication|document|brief/.test(lowerCombined) ? 0.9 : 0.84
-		};
-	}
-
-	if (
-		(isPdf || /report|whitepaper|publication|brief|document/.test(lowerCombined)) &&
-		(hasOrgDomain(args.domain) || hasEduDomain(args.domain) || args.authors.every((author) => author.corporate))
-	) {
-		return {
-			sourceType: 'Organization Report',
-			reasoningShort: 'Institutional report-style indicators were detected.',
-			confidence: 0.84
-		};
-	}
-
-	if (
-		(!hasScholarlyTypeSignal && hasNewsTypeSignal) ||
-		hasNewsDomainSignal(args.domain) ||
-		(/magazine|newspaper|news|editorial/.test(lowerCombined) && !hasAcademicDomain && !args.doi)
-	) {
-		return {
-			sourceType: 'Newspaper & Magazine Articles',
-			reasoningShort: 'News or magazine publication cues are present.',
-			confidence: 0.86
-		};
-	}
-
-	if (hasType('blogposting') || /\/blog\//.test(lowerPath) || /blog/.test(args.domain)) {
-		return {
-			sourceType: 'Blog/Blog Post',
-			reasoningShort: 'Blog URL or blog schema indicators detected.',
-			confidence: 0.82
-		};
-	}
-
-	if (args.title || args.siteName) {
-		return {
-			sourceType: 'Websites & Webpage',
-			reasoningShort: 'General webpage metadata available for this source.',
-			confidence: 0.68
-		};
-	}
-
-	return {
-		sourceType: 'Websites & Webpage',
-		reasoningShort: 'Insufficient evidence for a narrower source category.',
-		confidence: 0.45
-	};
-};
-
 const calculateConfidence = (args: {
 	baseConfidence: number;
 	title: string;
@@ -1258,6 +1038,8 @@ const buildNormalizedMetadata = (args: {
 	metaMap: Map<string, string[]>;
 	jsonLd: JsonLdExtraction;
 	htmlTitle: string;
+	strongestHeading: string;
+	contentType: string;
 	inputUrl: string;
 	finalUrl: string;
 }): NormalizedSourceMetadata => {
@@ -1269,12 +1051,32 @@ const buildNormalizedMetadata = (args: {
 		getDomain(args.finalUrl || args.inputUrl)
 	);
 
-	const titleCandidate = firstNonEmpty(
+	const structuredTitle = firstNonEmpty(
 		getMetaFirst(meta, 'citation_title', 'og:title', 'twitter:title', 'dc.title', 'title'),
-		jsonLd.titles[0],
-		args.htmlTitle
+		jsonLd.titles[0]
 	);
+	const htmlTitle = compactWhitespace(args.htmlTitle);
+	const urlDerivedTitle = extractTitleFromUrlPath(args.finalUrl || args.inputUrl);
+	const headingTitle = compactWhitespace(args.strongestHeading);
+	const preferHtmlTitleForReportDataset =
+		isReportOrDatasetSourceType(args.sourceType) && !!htmlTitle;
+	const shouldPreferHeadingTitle =
+		!!headingTitle &&
+		(!structuredTitle || isWeakOrGenericTitle(structuredTitle, siteName)) &&
+		/\b(report|market|industry|forecast|size|share|growth|opportunit(?:y|ies)|trend|dataset|statistics|white\s*paper|annual report)\b/i.test(
+			headingTitle
+		);
+
+	const titleCandidate = preferHtmlTitleForReportDataset
+		? firstNonEmpty(htmlTitle, headingTitle, structuredTitle, urlDerivedTitle)
+		: shouldPreferHeadingTitle
+			? firstNonEmpty(headingTitle, structuredTitle, htmlTitle, urlDerivedTitle)
+			: firstNonEmpty(structuredTitle, htmlTitle, urlDerivedTitle, headingTitle);
 	let title = removeDuplicatedSiteName(titleCandidate, siteName);
+
+	if (!title && args.contentType.includes('application/pdf')) {
+		title = urlDerivedTitle;
+	}
 
 	const researchGateInfo = getResearchGatePublicationInfo(args.finalUrl || args.inputUrl);
 	const hasTemporaryUnavailableTitle = /researchgate\s*-\s*temporarily unavailable|temporarily unavailable/i.test(
@@ -1350,6 +1152,15 @@ const buildNormalizedMetadata = (args: {
 		title.match(ISSN_PATTERN)?.[0] ?? ''
 	);
 
+	const citationFirstPage = firstNonEmpty(getMetaFirst(meta, 'citation_firstpage'));
+	const citationLastPage = firstNonEmpty(getMetaFirst(meta, 'citation_lastpage'));
+	const citationPageRange =
+		citationFirstPage && citationLastPage
+			? citationFirstPage === citationLastPage
+				? citationFirstPage
+				: `${citationFirstPage}-${citationLastPage}`
+			: firstNonEmpty(citationFirstPage, citationLastPage);
+
 	return {
 		sourceType: args.sourceType,
 		title,
@@ -1371,7 +1182,8 @@ const buildNormalizedMetadata = (args: {
 		volume: firstNonEmpty(getMetaFirst(meta, 'citation_volume', 'volume'), jsonLd.volumes[0]),
 		issue: firstNonEmpty(getMetaFirst(meta, 'citation_issue', 'issue'), jsonLd.issues[0]),
 		pages: firstNonEmpty(
-			getMetaFirst(meta, 'citation_firstpage', 'citation_lastpage', 'pages', 'page'),
+			citationPageRange,
+			getMetaFirst(meta, 'pages', 'page'),
 			jsonLd.pages[0]
 		),
 		edition: getMetaFirst(meta, 'citation_edition', 'edition'),
@@ -1387,33 +1199,6 @@ const buildNormalizedMetadata = (args: {
 		confidence: 0
 	};
 };
-
-const mapWithConcurrency = async <T, TResult>(
-	items: T[],
-	concurrency: number,
-	mapper: (item: T, index: number) => Promise<TResult>
-): Promise<TResult[]> => {
-	if (items.length === 0) {
-		return [];
-	}
-
-	const safeConcurrency = Math.max(1, Math.min(concurrency, items.length));
-	const results = new Array<TResult>(items.length);
-	let cursor = 0;
-
-	await Promise.all(
-		Array.from({ length: safeConcurrency }, async () => {
-			while (cursor < items.length) {
-				const index = cursor;
-				cursor += 1;
-				results[index] = await mapper(items[index], index);
-			}
-		})
-	);
-
-	return results;
-};
-
 const fallbackContextFromPlainText = (sourceText: string): CitationSourceContext => {
 	const normalizedText = compactWhitespace(sourceText);
 	const missingFields = ['author', 'publicationDate'];
@@ -1484,11 +1269,29 @@ const extractContextForSourceLine = async (sourceLine: string): Promise<Citation
 	}
 
 	const html = fetched?.html ?? '';
+	const finalUrlValue = fetched?.finalUrl || sourceUrl;
 	const metaMap = collectMetaMap(html);
 	const jsonLd = collectJsonLd(html);
 	const canonicalFromLink = collectCanonicalUrl(html);
 	const htmlTitle = collectTitle(html);
-	const researchGateInfo = getResearchGatePublicationInfo(fetched?.finalUrl || sourceUrl);
+	const strongestHeading = collectStrongestHeading(html);
+	const researchGateInfo = getResearchGatePublicationInfo(finalUrlValue);
+	const descriptionSignal = firstNonEmpty(
+		getMetaFirst(metaMap, 'description', 'og:description', 'twitter:description'),
+		jsonLd.descriptions[0]
+	);
+	const titleSignal = firstNonEmpty(
+		getMetaFirst(metaMap, 'citation_title', 'og:title', 'twitter:title', 'dc.title', 'title'),
+		jsonLd.titles[0],
+		htmlTitle,
+		strongestHeading
+	);
+	const metadataSignalCount =
+		(metaMap.size > 0 ? 1 : 0) +
+		(jsonLd.types.size > 0 ? 1 : 0) +
+		(titleSignal ? 1 : 0) +
+		(firstNonEmpty(getMetaFirst(metaMap, 'citation_doi', 'doi'), jsonLd.dois[0]) ? 1 : 0) +
+		((fetched?.contentType ?? '').includes('application/pdf') ? 1 : 0);
 
 	if (researchGateInfo.isPublication) {
 		warnings.push(
@@ -1500,8 +1303,8 @@ const extractContextForSourceLine = async (sourceLine: string): Promise<Citation
 	}
 
 	const preliminarySourceType = detectSourceType({
-		domain: getDomain(fetched?.finalUrl || sourceUrl),
-		pathname: getPathname(fetched?.finalUrl || sourceUrl),
+		domain: getDomain(finalUrlValue),
+		pathname: getPathname(finalUrlValue),
 		contentType: fetched?.contentType ?? '',
 		jsonLdTypes: jsonLd.types,
 		researchGatePublication: researchGateInfo.isPublication,
@@ -1515,26 +1318,92 @@ const extractContextForSourceLine = async (sourceLine: string): Promise<Citation
 			getMetaFirst(metaMap, 'citation_publication_date', 'article:published_time', 'dc.date'),
 			jsonLd.publicationDates[0]
 		),
-		title: firstNonEmpty(getMetaFirst(metaMap, 'citation_title', 'og:title'), jsonLd.titles[0], htmlTitle),
+		title: firstNonEmpty(
+			getMetaFirst(metaMap, 'citation_title', 'og:title', 'twitter:title', 'dc.title'),
+			jsonLd.titles[0],
+			htmlTitle,
+			strongestHeading
+		),
+		description: descriptionSignal,
+		headingTitle: strongestHeading,
+		metadataSignalCount,
 		authors: jsonLd.authors
 			.map((author) => normalizeAuthor(author.name, author.corporate))
 			.filter((author): author is NormalizedSourceAuthor => author !== null),
 		siteName: firstNonEmpty(getMetaFirst(metaMap, 'og:site_name'), jsonLd.siteNames[0])
 	});
-	const resolvedSourceType = normalizeSourceTypeLabel(preliminarySourceType.sourceType);
+	let resolvedSourceType = normalizeSourceTypeLabel(preliminarySourceType.sourceType);
+	let reasoningShort = preliminarySourceType.reasoningShort;
+
+	const hasBookSignalFromMetadata =
+		Boolean(firstNonEmpty(getMetaFirst(metaMap, 'citation_isbn', 'isbn', 'book:isbn'), jsonLd.isbns[0])) ||
+		Array.from(jsonLd.types).some((type) => type.includes('book')) ||
+		/\b(book|edition|isbn|hardcover|paperback)\b/i.test(
+			`${titleSignal} ${descriptionSignal} ${getPathname(finalUrlValue)}`
+		) ||
+		/(books\.google\.|openlibrary|goodreads|amazon\.)/i.test(getDomain(finalUrlValue));
+
+	let bookResolution: Awaited<ReturnType<typeof resolveBookFromUrl>> | null = null;
+	if (resolvedSourceType !== 'Journal Articles' && hasBookSignalFromMetadata) {
+		bookResolution = await resolveBookFromUrl(finalUrlValue, {
+			fetchImpl: fetch,
+			timeoutMs: FETCH_TIMEOUT_MS,
+			googleApiKey: toTrimmedString(env.GOOGLE_BOOKS_API_KEY),
+			fallbackToOpenLibrary: true,
+			pageHtml: html || undefined,
+			finalUrl: finalUrlValue
+		});
+
+		warnings.push(...bookResolution.warnings);
+
+		if (bookResolution.found && bookResolution.sourceType === 'book') {
+			resolvedSourceType = 'Books';
+			reasoningShort = `Book metadata resolved via ${bookResolution.provider} (${bookResolution.method}).`;
+		}
+	}
 
 	const metadata = buildNormalizedMetadata({
 		sourceType: resolvedSourceType,
 		metaMap,
 		jsonLd,
 		htmlTitle,
+		strongestHeading,
+		contentType: fetched?.contentType ?? '',
 		inputUrl: sourceUrl,
-		finalUrl: fetched?.finalUrl || sourceUrl
+		finalUrl: finalUrlValue
 	});
 
 	metadata.canonicalUrl = normalizeUrlValue(
 		firstNonEmpty(canonicalFromLink, getMetaFirst(metaMap, 'og:url', 'twitter:url'), metadata.url)
 	);
+
+	if (bookResolution?.found && bookResolution.sourceType === 'book') {
+		const resolvedPublicationDate = toIsoDate(bookResolution.metadata.publishedDate);
+		const resolvedYear = resolvedPublicationDate.slice(0, 4);
+		const resolvedAuthors = bookResolution.metadata.authors
+			.map((author) => normalizeAuthor(author.full, false))
+			.filter((author): author is NormalizedSourceAuthor => author !== null);
+
+		metadata.sourceType = 'Books';
+		metadata.title = firstNonEmpty(bookResolution.metadata.title, metadata.title);
+		metadata.subtitle = firstNonEmpty(bookResolution.metadata.subtitle, metadata.subtitle);
+		metadata.authors = resolvedAuthors.length > 0 ? resolvedAuthors : metadata.authors;
+		metadata.publisher = firstNonEmpty(bookResolution.metadata.publisher, metadata.publisher);
+		metadata.publicationDate = firstNonEmpty(resolvedPublicationDate, metadata.publicationDate);
+		metadata.year = firstNonEmpty(resolvedYear, metadata.year);
+		metadata.isbn = firstNonEmpty(
+			bookResolution.metadata.isbn13,
+			bookResolution.metadata.isbn10,
+			metadata.isbn
+		);
+		metadata.canonicalUrl = normalizeUrlValue(
+			firstNonEmpty(bookResolution.metadata.canonicalBookUrl, metadata.canonicalUrl, metadata.url)
+		);
+
+		warnings.push(
+			`Book resolver selected ${bookResolution.provider} via ${bookResolution.method} with confidence ${bookResolution.confidence.toFixed(2)}.`
+		);
+	}
 
 	const structuredSignals =
 		(metaMap.size > 0 ? 2 : 0) +
@@ -1543,14 +1412,23 @@ const extractContextForSourceLine = async (sourceLine: string): Promise<Citation
 		(metadata.publicationDate ? 1 : 0) +
 		(metadata.doi || metadata.isbn ? 1 : 0);
 
+	const baseConfidence =
+		bookResolution?.found && bookResolution.sourceType === 'book'
+			? Math.max(preliminarySourceType.confidence, bookResolution.confidence)
+			: preliminarySourceType.confidence;
+
 	metadata.confidence = calculateConfidence({
-		baseConfidence: preliminarySourceType.confidence,
+		baseConfidence,
 		title: metadata.title,
 		authorCount: metadata.authors.length,
 		publicationDate: metadata.publicationDate,
 		structuredSignals,
 		fetchFailed
 	});
+
+	if (bookResolution?.found && bookResolution.sourceType === 'book') {
+		metadata.confidence = Math.max(metadata.confidence, Math.min(0.99, bookResolution.confidence));
+	}
 
 	const sourceName = firstNonEmpty(metadata.title, metadata.siteName, sourceText);
 	const missingFields = ['title', 'author', 'publicationDate']
@@ -1573,7 +1451,7 @@ const extractContextForSourceLine = async (sourceLine: string): Promise<Citation
 		sourceName,
 		sourceType: resolvedSourceType,
 		confidence: metadata.confidence,
-		reasoningShort: preliminarySourceType.reasoningShort,
+		reasoningShort,
 		missingFields,
 		warnings,
 		metadata

@@ -42,6 +42,54 @@ const startOfUtcDay = (value = new Date()): Date => {
 
 const toIsoDate = (value: Date): string => value.toISOString().slice(0, 10);
 
+type CitationAiMetadataItem = {
+	citationId?: number | null;
+	sourceName?: string;
+	sourceType?: string;
+	sourceText?: string;
+	method?: string;
+	reason?: string;
+};
+
+type CitationGenerationMetadataPayload = {
+	style?: string;
+	mode?: string;
+	fromStyle?: string | null;
+	citationId?: number | null;
+	ai?: {
+		requiredCount?: number;
+		totalCount?: number;
+		items?: CitationAiMetadataItem[];
+	};
+};
+
+const toSafeString = (value: unknown): string => {
+	if (typeof value !== 'string') {
+		return '';
+	}
+
+	return value.trim();
+};
+
+const parseCitationGenerationMetadata = (
+	value: string | null
+): CitationGenerationMetadataPayload | null => {
+	if (!value) {
+		return null;
+	}
+
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		if (!parsed || typeof parsed !== 'object') {
+			return null;
+		}
+
+		return parsed as CitationGenerationMetadataPayload;
+	} catch {
+		return null;
+	}
+};
+
 export const load: PageServerLoad = async (event) => {
 	if (!event.locals.user) {
 		return redirect(302, '/auth');
@@ -56,7 +104,18 @@ export const load: PageServerLoad = async (event) => {
 	const seriesStartInclusive = new Date(seriesEndExclusive);
 	seriesStartInclusive.setUTCDate(seriesStartInclusive.getUTCDate() - DAILY_GENERATION_DAYS);
 
-	const [userRows, projectCountRows, citationCountRows, requestRows, dailyRows, onboardingRows, academicRoleRows, discoveryRows, rmitRows] =
+	const [
+		userRows,
+		projectCountRows,
+		citationCountRows,
+		requestRows,
+		dailyRows,
+		onboardingRows,
+		academicRoleRows,
+		discoveryRows,
+		rmitRows,
+		generationAuditRows
+	] =
 		await Promise.all([
 			db
 				.select({
@@ -130,7 +189,24 @@ export const load: PageServerLoad = async (event) => {
 			db
 				.select({ isFromRmit: authUser.isFromRmit, count: sql<number>`count(*)` })
 				.from(authUser)
-				.groupBy(authUser.isFromRmit)
+				.groupBy(authUser.isFromRmit),
+			db
+				.select({
+					eventId: citationGenerationEvent.id,
+					createdAt: citationGenerationEvent.createdAt,
+					actionType: citationGenerationEvent.actionType,
+					metadata: citationGenerationEvent.metadata,
+					generatedCount: citationGenerationEvent.generatedCount,
+					userName: authUser.name,
+					userEmail: authUser.email,
+					projectId: project.id,
+					projectName: project.name
+				})
+				.from(citationGenerationEvent)
+				.innerJoin(authUser, eq(citationGenerationEvent.userId, authUser.id))
+				.leftJoin(project, eq(citationGenerationEvent.projectId, project.id))
+				.orderBy(desc(citationGenerationEvent.createdAt))
+				.limit(300)
 		]);
 
 	const projectCountMap = new Map(projectCountRows.map((row) => [row.userId, Number(row.count)]));
@@ -166,6 +242,35 @@ export const load: PageServerLoad = async (event) => {
 			label,
 			value: dailyGenerationMap.get(label) ?? 0
 		};
+	});
+
+	const openAiReviewRows = generationAuditRows.flatMap((eventRow) => {
+		const parsed = parseCitationGenerationMetadata(eventRow.metadata);
+		const items = parsed?.ai?.items;
+		if (!Array.isArray(items) || items.length === 0) {
+			return [];
+		}
+
+		return items.map((item, itemIndex) => ({
+			id: `${eventRow.eventId}-${itemIndex + 1}`,
+			eventId: eventRow.eventId,
+			createdAt: eventRow.createdAt.toISOString(),
+			actionType: eventRow.actionType,
+			userName: eventRow.userName,
+			userEmail: eventRow.userEmail,
+			projectId: eventRow.projectId,
+			projectName: eventRow.projectName || '(deleted project)',
+			citationId: typeof item.citationId === 'number' ? item.citationId : null,
+			style: toSafeString(parsed?.style),
+			mode: toSafeString(parsed?.mode),
+			fromStyle: toSafeString(parsed?.fromStyle),
+			sourceName: toSafeString(item.sourceName),
+			sourceType: toSafeString(item.sourceType),
+			sourceText: toSafeString(item.sourceText),
+			resolver: toSafeString(item.method),
+			reason: toSafeString(item.reason),
+			eventGeneratedCount: Number(eventRow.generatedCount)
+		}));
 	});
 
 	return {
@@ -214,7 +319,9 @@ export const load: PageServerLoad = async (event) => {
 		rmitSummary: rmitRows.map((row) => ({
 			label: row.isFromRmit ? 'RMIT' : 'Non-RMIT',
 			value: Number(row.count)
-		}))
+		})),
+		openAiReviewCount: openAiReviewRows.length,
+		openAiReviewRows
 	};
 };
 
